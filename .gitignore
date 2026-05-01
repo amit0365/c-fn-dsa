@@ -1,0 +1,15 @@
+# Build artifacts
+*.o
+test_fndsa
+test_path_b
+test_sampler
+test_sign
+speed_fndsa
+bench_baseline
+bench_pathb
+
+# Editor / IDE
+.claude/
+
+# macOS
+.DS_Store

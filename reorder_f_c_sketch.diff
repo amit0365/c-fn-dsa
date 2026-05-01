@@ -1,0 +1,155 @@
+# Reorder F — C sketch diff against sign_sampler.c (HEAD 33026d4)
+#
+# This is a Day 1 sketch per c-fn-dsa/KILL_PLAN.md. NOT YET COMPILED.
+# Scalar path only (Cortex-M35P is the deployment target; SSE2/NEON ports
+# are Day 2 follow-ups). Gated behind FNDSA_REORDER_F so the new path is
+# bypassed by default and toggleable for A/B test-vector comparison.
+#
+# The fused replacement combines:
+#   merge_fft        (sign_fpoly.c:2369-2462, scalar variant at 2451-2461)
+#   memcpy(qc14, t1) + sub(qc14, z1)
+#   memcpy(t1, z1)
+#   mul_fft(qc14, l10) + add(t0, qc14)
+# into a single loop on i ∈ [0, qn). z1 is never materialized into qc(18..21).
+#
+# Bit-exact rationale: each output coefficient in the fused loop comes from
+# the same multiply-add tree as in the unfused sequence, in the same order.
+# Same IEEE-754 rounding ⇒ same bits. The leaf at logn=1 already does this
+# fusion (sign_sampler.c:1004-1018 SSE2, :1074-1088 NEON) — we are
+# generalizing the established pattern up the recursion.
+#
+# IMPORTANT (per c_reorder_f_day1.md): this saves a transient 1n in
+# working set at the merge moment, but does NOT reduce the function's
+# peak (7n at the first recursion is structural). To realize a 1n peak
+# saving, this diff must be combined with a layout reshuffle that moves
+# the left-subtree storage from qc(18..21) into qc(8..11).
+
+--- a/sign_sampler.c
++++ b/sign_sampler.c
+@@ -1244,6 +1244,9 @@
+ 	      14..15   g11 (self-adjoint)
+ 	      16..27   free space
+
++	   With FNDSA_REORDER_F enabled, qc(18..21) is no longer used as
++	   z1 staging; the merge is fused with the subsequent t1-z1, mul,
++	   add operations into a single streaming loop.
+ 	   All recursive calls make the callee input start at offset 14:
+ 	   the callee receives half the space for half the degree. */
+ #define qc(off)   (tmp + ((off) << (logn - 2)))
+@@ -1278,9 +1281,73 @@
+ 	/* Split t1 and make the first recursive call on the two
+ 	   halves, using the right sub-tree, then merge the result
+ 	   into 18..21 */
+ 	fpoly_split_fft(logn, qc(14), qc(16), qc(4));
+ 	ffsamp_fft_inner(ss, logn - 1, qc(14));
++
++#if FNDSA_REORDER_F
++	/* Reorder F: fused merge → (t1 - z1) → ·l10 → +t0 → write tb0/z1.
++	   Replaces fpoly_merge_fft + memcpy + sub + memcpy + mul + add.
++	   z1 is consumed in registers per pair (2i, 2i+1); never written
++	   to qc(18..21).
++
++	   Layout invariants used:
++	     qc(0)  t0    (read once per element, overwritten with tb0)
++	     qc(4)  t1    (read once per element, overwritten with z1)
++	     qc(8)  l10   (read once per element, dead after this loop)
++	     qc(14) z1_low  = callee's t0 output, half-degree FFT
++	     qc(16) z1_high = callee's t1 output, half-degree FFT
++	   All four half-degree quarters at qc(14..17) are dead after.
++
++	   Inner-iteration aliasing: each iteration reads qc(4)[2i...] then
++	   writes qc(4)[2i...]. Reads complete before writes (registers).
++	   Across iterations, indices are disjoint. Scalar path shown;
++	   SSE2/NEON variants follow the existing fpoly_merge_fft pattern. */
++	{
++		size_t hn = (size_t)1 << (logn - 1);
++		size_t qn = hn >> 1;
++		fpr *t0   = qc(0);
++		fpr *t1   = qc(4);
++		const fpr *l10  = qc(8);
++		const fpr *zlow  = qc(14);   /* callee t0 (z1 low half, FFT)  */
++		const fpr *zhigh = qc(16);   /* callee t1 (z1 high half, FFT) */
++
++		for (size_t i = 0; i < qn; i ++) {
++			/* Merge twiddle (same indexing as fpoly_merge_fft). */
++			fpr s_re = GM[((i + hn) << 1) + 0];
++			fpr s_im = GM[((i + hn) << 1) + 1];
++			fpr a_re = zlow[i],         a_im = zlow[i + qn];
++			fpr b_re = zhigh[i],        b_im = zhigh[i + qn];
++			/* c = b * s  (complex mul) */
++			fpr c_re = fpr_sub(fpr_mul(b_re, s_re), fpr_mul(b_im, s_im));
++			fpr c_im = fpr_add(fpr_mul(b_im, s_re), fpr_mul(b_re, s_im));
++			/* z1[2i]   = a + c
++			   z1[2i+1] = a - c    (real and imag parts) */
++			fpr z0_re = fpr_add(a_re, c_re);
++			fpr z0_im = fpr_add(a_im, c_im);
++			fpr z1_re = fpr_sub(a_re, c_re);
++			fpr z1_im = fpr_sub(a_im, c_im);
++			/* d = t1 - z1 (read t1 BEFORE writing z1 to t1's slot). */
++			fpr d0_re = fpr_sub(t1[(i << 1) + 0],      z0_re);
++			fpr d0_im = fpr_sub(t1[(i << 1) + 0 + hn], z0_im);
++			fpr d1_re = fpr_sub(t1[(i << 1) + 1],      z1_re);
++			fpr d1_im = fpr_sub(t1[(i << 1) + 1 + hn], z1_im);
++			/* p = d * l10 (FFT-domain complex mul, per element). */
++			fpr l0_re = l10[(i << 1) + 0],      l0_im = l10[(i << 1) + 0 + hn];
++			fpr l1_re = l10[(i << 1) + 1],      l1_im = l10[(i << 1) + 1 + hn];
++			fpr p0_re = fpr_sub(fpr_mul(d0_re, l0_re), fpr_mul(d0_im, l0_im));
++			fpr p0_im = fpr_add(fpr_mul(d0_re, l0_im), fpr_mul(d0_im, l0_re));
++			fpr p1_re = fpr_sub(fpr_mul(d1_re, l1_re), fpr_mul(d1_im, l1_im));
++			fpr p1_im = fpr_add(fpr_mul(d1_re, l1_im), fpr_mul(d1_im, l1_re));
++			/* tb0 = t0 + p  (write into qc(0)) */
++			t0[(i << 1) + 0]      = fpr_add(t0[(i << 1) + 0],      p0_re);
++			t0[(i << 1) + 0 + hn] = fpr_add(t0[(i << 1) + 0 + hn], p0_im);
++			t0[(i << 1) + 1]      = fpr_add(t0[(i << 1) + 1],      p1_re);
++			t0[(i << 1) + 1 + hn] = fpr_add(t0[(i << 1) + 1 + hn], p1_im);
++			/* z1 → t1 (write into qc(4)) */
++			t1[(i << 1) + 0]      = z0_re;
++			t1[(i << 1) + 0 + hn] = z0_im;
++			t1[(i << 1) + 1]      = z1_re;
++			t1[(i << 1) + 1 + hn] = z1_im;
++		}
++	}
++#else
+ 	fpoly_merge_fft(logn, qc(18), qc(14), qc(16));
+
+ 	/* Current layout:
+@@ -1295,6 +1362,7 @@
+ 	memcpy(qc(4), qc(18), sizeof(fpr) << logn);
+ 	fpoly_mul_fft(logn, qc(14), qc(8));
+ 	fpoly_add(logn, qc(0), qc(14));
++#endif /* FNDSA_REORDER_F */
+
+ 	/* Current layout:
+ 	      0..3     tb0
+
+
+# --- Notes for Day 2 (compile) -----------------------------------------------
+#
+# 1. fpr_add / fpr_sub / fpr_mul: defined in sign_inner.h around the FPR_*
+#    block. The scalar emulation path is what Cortex-M35P uses. Cortex-M4
+#    uses inline asm (sign_fpr_cm4.s); since the asm path defines its own
+#    fpr_add/sub/mul intrinsics with the same C-level signatures, this code
+#    should compile against either backend with no changes.
+#
+# 2. GM[]: declared in sign_fpoly.c as a static const array of fpr pairs.
+#    The fused loop at sign_sampler.c needs visibility. Either:
+#    (a) move the GM declaration to a header (cleanest), or
+#    (b) duplicate the index expression by calling a thin wrapper from
+#        sign_fpoly.c. Option (a) preferred. Verify GM is the same one
+#        used at sign_fpoly.c:2442-2443.
+#
+# 3. SSE2 / NEON variants: not in this sketch. Pattern is in
+#    fpoly_merge_fft (sign_fpoly.c:2379-2434). Replicate that vectorization
+#    over the fused expression. Estimate: ~1 day per architecture.
+#
+# 4. Test surface: existing test vectors at logn ∈ {2, 5, 8, 9, 10}.
+#    Run with FNDSA_REORDER_F=0 (baseline) and =1 (new path), compare bit
+#    output. Per the leaf precedent, expected outcome is bit-exact.
+#
+# 5. Decision tree per KILL_PLAN.md:
+#    - Compiles + bit-exact: orange (savings don't track 1n on peak per
+#      c_reorder_f_day1.md; but implementation is sound)
+#    - Compiles + KAT failure: red, but unexpected — leaf precedent should
+#      transfer. Most likely cause would be an FMA fusion difference;
+#      retest with -ffp-contract=off (per KILL_PLAN.md Day 3-4).
+#    - Doesn't compile: 1-2 day debugging budget per the kill plan.

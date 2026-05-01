@@ -1,0 +1,257 @@
+# Path B sketch diff against sign_sampler.c (HEAD 33026d4)
+#
+# Day 2 deliverable per c-fn-dsa/KILL_PLAN.md. NOT YET COMPILED.
+# Companion: path_b_layout_walkthrough.md.
+#
+# Implements t0 + t1·l10 absorption + tight repack to bring ffsamp_fft_inner
+# peak from 7n FLR to 6n FLR (saves 1n = 8 KiB at logn=10, 4 KiB at logn=9).
+#
+# Gated by FNDSA_PATH_B so the new path is bypassed by default and toggleable
+# for distribution-equivalence testing.
+#
+# IMPORTANT (per c_reorder_f_day1.md Day 1.5 addendum):
+# - This refactor is NOT bit-exact with the existing C KATs. The FP order
+#   changes from `(t1 - z1)·l10 + t0` to `(t0 + t1·l10) - z1·l10`.
+#   Distribution-equivalent under the FN-DSA spec; KATs need regeneration.
+# - Memcpy budget per signature: 4n FLR (~32 KiB bus traffic at logn=10).
+#   Estimated 5-7% perf hit on Cortex-M35P. Acceptable, can be clawed back
+#   with the in-place-mul optimization noted in the walkthrough.
+# - Aliasing in fpoly_split_selfadj_fft (f1 == f corrupts) handled via 2q
+#   scratch save of d11 before splitting. See sign_fpoly.c:2289-2362 for the
+#   underlying access pattern that makes the aliasing unsafe.
+#
+# Scalar/unified path only (single C source covers SSE2/NEON/RV64D/scalar via
+# fpoly_*_fft primitives; M35P deployment target uses scalar). Cortex-M4
+# assembly path at sign_sampler_cm4.s would need a parallel port.
+
+--- a/sign_sampler.c
++++ b/sign_sampler.c
+@@ -1234,7 +1234,7 @@
+ 	/* General case: logn >= 2 */
+
+ 	/* Layout: we split the tmp[] space into 28 chunks of size qn = n/4.
+-	   All offsets below are expressed in multiples of qn.
++	   All offsets below are expressed in multiples of qn (baseline path).
+
+ 	   Input:
+ 	      0..3     t0
+@@ -1244,11 +1244,167 @@
+ 	      14..15   g11 (self-adjoint)
+ 	      16..27   free space
+
++	   With FNDSA_PATH_B enabled, the function uses a tighter 24-quarter
++	   layout (24q = 6n FLR vs baseline 28q = 7n FLR), saving 1n on peak.
++	   The cost is FP-order change in the tb0 recurrence; resulting
++	   signatures are distribution-equivalent but not bit-exact with the
++	   existing KATs. See path_b_layout_walkthrough.md for the full layout
++	   transition and bit-exactness analysis.
++
+ 	   All recursive calls make the callee input start at offset 14:
+-	   the callee receives half the space for half the degree. */
++	   the callee receives half the space for half the degree.
++	   Under FNDSA_PATH_B, the callee starts at offset 10 instead. */
+ #define qc(off)   (tmp + ((off) << (logn - 2)))
+
++#if FNDSA_PATH_B
++
++	/* ============================================================
++	 * Path B body (24-quarter tight layout)
++	 *
++	 * Pre-recursion final layout:
++	 *   qc(0..3)   c1 = t0 + t1·l10  (persistent across right recursion)
++	 *   qc(4..7)   l10                (persistent; needed post-recursion)
++	 *   qc(8..9)   d00                (persistent; needed for left subtree)
++	 *   qc(10..11) callee_t0 (split-low of t1)
++	 *   qc(12..13) callee_t1 (split-high of t1)
++	 *   qc(14..15) right_01  (callee g01)
++	 *   qc(16)     right_00  (callee g00, self-adjoint)
++	 *   qc(17)     right_11  (callee g11, self-adjoint = right_00 copy)
++	 *   qc(18..23) callee free scratch (6 outer-q = 12 callee-q)
++	 *
++	 * The recursion uses tmp = qc(10) so callee operates on qc(10..23).
++	 * ============================================================ */
++
++	/* Step 1: LDL (same as baseline). g00 unchanged → d00 at qc(12..13);
++	   g01 → l10 at qc(8..11); g11 → d11 at qc(14..15). */
++	fpoly_LDL_fft(logn, qc(12), qc(8), qc(14));
++
++	/* Step 2: scratch t1·l10 → qc(16..19). qc(16..19) is "free" at this
++	   point in the baseline; we use it as the mul-scratch buffer. */
++	memcpy(qc(16), qc(4), sizeof(fpr) << logn);
++	fpoly_mul_fft(logn, qc(16), qc(8));
++
++	/* Step 3: c1 := t0 + (t1·l10), in place at qc(0..3). qc(16..19) becomes
++	   dead. NOTE: this is the FP-order change vs baseline — original was
++	   `t0 + (t1 - z1)·l10` evaluated post-recursion. */
++	fpoly_add(logn, qc(0), qc(16));
++
++	/* Step 4: save l10 and d00 to scratch positions where they survive the
++	   upcoming d11 split and t1 split. l10 → qc(20..23), d00 → qc(18..19). */
++	memcpy(qc(20), qc(8), sizeof(fpr) << logn);
++	memcpy(qc(18), qc(12), sizeof(fpr) << (logn - 1));
++	/* After save: qc(8..11) (old l10) and qc(12..13) (old d00) are stale,
++	   ready to be overwritten. */
++
++	/* Step 5: save d11 to scratch (handle aliasing: fpoly_split_selfadj_fft
++	   does NOT tolerate f1 == f — see path_b_layout_walkthrough.md
++	   addendum 1). Move d11 to qc(8..9), then split. */
++	memcpy(qc(8), qc(14), sizeof(fpr) << (logn - 1));
++	fpoly_split_selfadj_fft(logn, qc(16), qc(14), qc(8));
++	memcpy(qc(17), qc(16), sizeof(fpr) << (logn - 2));
++	/* After split: qc(14..15) = right_01, qc(16) = right_00, qc(17) = right_11.
++	   qc(8..9) holds stale d11 (about to be overwritten by restored d00). */
++
++	/* Step 6: split t1 with output at the new callee positions. t1 still
++	   alive at qc(4..7); split is non-destructive. */
++	fpoly_split_fft(logn, qc(10), qc(12), qc(4));
++	/* After split: qc(10..11) = callee_t0, qc(12..13) = callee_t1.
++	   qc(4..7) still nominally holds t1 but is logically dead. */
++
++	/* Step 7: restore l10 and d00 to their final positions. l10 from
++	   qc(20..23) → qc(4..7); d00 from qc(18..19) → qc(8..9). */
++	memcpy(qc(4), qc(20), sizeof(fpr) << logn);
++	memcpy(qc(8), qc(18), sizeof(fpr) << (logn - 1));
++	/* qc(18..23) becomes dead (callee will overwrite as scratch). */
++
++	/* Step 8: first recursive call. Callee tmp = qc(10), uses qc(10..23). */
++	ffsamp_fft_inner(ss, logn - 1, qc(10));
++	/* After recursion: qc(10..11) = z1_low (callee t0 output);
++	                    qc(12..13) = z1_high (callee t1 output). */
++
++	/* Step 9: fused merge + tb0 recurrence: tb0 = c1 - z1·l10; z1 → t1 slot.
++	   z1 is computed on the fly from (qc(10..11), qc(12..13)) per the merge
++	   formula at sign_fpoly.c:2444-2449, fused with the subsequent
++	   sub/mul/add into a single pass. l10 (read) and t1-slot (write) are
++	   both qc(4..7); the per-element body reads l10[2i..] then writes
++	   z1[2i..] back into qc(4..7) — read-before-write within an iteration
++	   is safe; across iterations, indices are disjoint.
++
++	   This is the Reorder F-style fusion adapted to the Path B layout.
++	   Replaces the unfused merge → memcpy → sub → memcpy → mul → add chain
++	   in the baseline. */
++	{
++		size_t hn = (size_t)1 << (logn - 1);
++		size_t qn = hn >> 1;
++		fpr *out_tb0 = qc(0);  /* read c1, write tb0 */
++		fpr *l10_t1  = qc(4);  /* l10 in, z1 out */
++		const fpr *zlow  = qc(10);
++		const fpr *zhigh = qc(12);
++
++		for (size_t i = 0; i < qn; i ++) {
++			/* Merge: z1[2i]   = a + b·s
++			          z1[2i+1] = a - b·s   (per element pair) */
++			fpr s_re = GM[((i + hn) << 1) + 0];
++			fpr s_im = GM[((i + hn) << 1) + 1];
++			fpr a_re = zlow[i],         a_im = zlow[i + qn];
++			fpr b_re = zhigh[i],        b_im = zhigh[i + qn];
++			fpr c_re = fpr_sub(fpr_mul(b_re, s_re), fpr_mul(b_im, s_im));
++			fpr c_im = fpr_add(fpr_mul(b_im, s_re), fpr_mul(b_re, s_im));
++			fpr z0_re = fpr_add(a_re, c_re), z0_im = fpr_add(a_im, c_im);
++			fpr z1_re = fpr_sub(a_re, c_re), z1_im = fpr_sub(a_im, c_im);
++
++			/* Read l10 BEFORE we overwrite this slot with z1 */
++			fpr l0_re = l10_t1[(i << 1) + 0],      l0_im = l10_t1[(i << 1) + 0 + hn];
++			fpr l1_re = l10_t1[(i << 1) + 1],      l1_im = l10_t1[(i << 1) + 1 + hn];
++
++			/* p = z1 · l10 */
++			fpr p0_re = fpr_sub(fpr_mul(z0_re, l0_re), fpr_mul(z0_im, l0_im));
++			fpr p0_im = fpr_add(fpr_mul(z0_re, l0_im), fpr_mul(z0_im, l0_re));
++			fpr p1_re = fpr_sub(fpr_mul(z1_re, l1_re), fpr_mul(z1_im, l1_im));
++			fpr p1_im = fpr_add(fpr_mul(z1_re, l1_im), fpr_mul(z1_im, l1_re));
++
++			/* tb0 = c1 - p, in place at qc(0..3) */
++			out_tb0[(i << 1) + 0]      = fpr_sub(out_tb0[(i << 1) + 0],      p0_re);
++			out_tb0[(i << 1) + 0 + hn] = fpr_sub(out_tb0[(i << 1) + 0 + hn], p0_im);
++			out_tb0[(i << 1) + 1]      = fpr_sub(out_tb0[(i << 1) + 1],      p1_re);
++			out_tb0[(i << 1) + 1 + hn] = fpr_sub(out_tb0[(i << 1) + 1 + hn], p1_im);
++
++			/* z1 → t1 slot (overwrites l10 at qc(4..7)) */
++			l10_t1[(i << 1) + 0]      = z0_re;
++			l10_t1[(i << 1) + 0 + hn] = z0_im;
++			l10_t1[(i << 1) + 1]      = z1_re;
++			l10_t1[(i << 1) + 1 + hn] = z1_im;
++		}
++	}
++	/* After step 9:
++	     qc(0..3): tb0
++	     qc(4..7): z1
++	     qc(8..9): d00
++	     qc(10..23): dead
++	*/
++
++	/* Step 10: split d00 with output at callee positions (no aliasing
++	   issue: f1 = qc(14..15), f0 = qc(16), f = qc(8..9) — all disjoint). */
++	fpoly_split_selfadj_fft(logn, qc(16), qc(14), qc(8));
++	memcpy(qc(17), qc(16), sizeof(fpr) << (logn - 2));
++
++	/* Step 11: split tb0 with output at callee positions. */
++	fpoly_split_fft(logn, qc(10), qc(12), qc(0));
++
++	/* Step 12: second recursive call. */
++	ffsamp_fft_inner(ss, logn - 1, qc(10));
++
++	/* Step 13: final merge of z0 from (callee t0, callee t1) into qc(0..3). */
++	fpoly_merge_fft(logn, qc(0), qc(10), qc(12));
++
++	/* On exit: z0 at qc(0..3), z1 at qc(4..7) — matches the function's
++	   API contract. Caller (sign_core.c:213) reads (t0, t1) at the same
++	   addresses. */
++
++#else /* !FNDSA_PATH_B — baseline (unchanged) */
++
+ 	/* Decompose G into LDL; the decomposed matrix replaces G. */
+ 	fpoly_LDL_fft(logn, qc(12), qc(8), qc(14));
+
+@@ -1325,7 +1481,9 @@
+ 	fpoly_split_fft(logn, qc(14), qc(16), qc(0));
+ 	ffsamp_fft_inner(ss, logn - 1, qc(14));
+ 	fpoly_merge_fft(logn, qc(0), qc(14), qc(16));
+
++#endif /* FNDSA_PATH_B */
++
+ #undef qc
+ }
+ #endif
+
+
+# --- Notes for Day 3+ (compile, validate) -----------------------------------
+#
+# Pre-compilation checks:
+#
+# 1. GM[] visibility: the fused merge in step 9 references GM[]. In baseline,
+#    GM is static within sign_fpoly.c. To make it visible in sign_sampler.c,
+#    either move the declaration to sign_inner.h or call a thin wrapper from
+#    sign_fpoly.c. See reorder_f_c_sketch.diff Note 2 for the same issue.
+#
+# 2. Caller's tmp[] requirement: with Path B enabled, fndsa.h documents 59n+31
+#    bytes for sign_temp. Path B only needs 51n+31 bytes. The caller in sign.c
+#    currently allocates 59n on the stack (fndsa_sign) or accepts a 59n
+#    buffer (fndsa_sign_temp). For Day 2 sketch, the over-allocation is
+#    harmless. For full deployment, update:
+#      - sign.c:31  G = tmp + ((size_t)58 << logn)  →  tmp + ((size_t)50 << logn)
+#      - sign_core.c:141  hm = tmp + 56*n  →  tmp + 48*n
+#      - sign_inner.h:675  comment "tmp size: 58*n bytes"  →  "50*n bytes"
+#      - fndsa.h:245  "Formula is: 59*n+31"  →  "51*n+31"
+#      - fndsa_sign() stack allocation in sign.c  →  drop to 51n+31
+#
+# 3. Recursive Path B (auto-applies): with this diff, ffsamp_fft_inner uses
+#    Path B at every recursion level (the recursion calls itself with logn-1).
+#    This gives recursive Path B savings beyond just the outer-level 1n.
+#    Asymptotic peak: ~5.25n FLR. To realize this saving in tmp[] allocation,
+#    the per-level callee_alloc would need to be tightened from 14 outer-q
+#    (current Path B layout) to ~11 outer-q at logn=10. Not done in this
+#    sketch — left for Day 11+ extension.
+#
+# 4. Distribution-equivalence test plan (Day 3-4):
+#    - Generate ~10^6 signatures with baseline and Path B at logn ∈ {2, 5, 8, 9, 10}
+#    - For each: chi-squared test on per-coefficient z0/z1 distribution against
+#      expected discrete Gaussian
+#    - Aggregate norm distribution comparison
+#    - Acceptance rate (signatures rejected by norm bound) within statistical noise
+#    - Verify all signatures verify under the FN-DSA verifier (correctness)
+#
+# 5. Decision tree per KILL_PLAN.md (Path B):
+#    - Compiles + verifies + distribution match: green
+#    - Compiles + verifies + distribution differs: red, kill — absorption broke the algorithm
+#    - Compiles + verification fails: red, kill — implementation bug or algorithmic error
+#    - Doesn't compile: 1-2 day debugging budget
