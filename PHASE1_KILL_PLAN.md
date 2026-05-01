@@ -197,25 +197,68 @@ and the baseline.
 
 **Time:** 1 day.
 
-## Day 7: Bench
+## Day 7: Hardware bench (REVISED — Speculos can't validate this)
 
-**Goal:** Quantify the perf cost of the new phase 1.
+**Critical context** (per Day 0 ST33K1M5 investigation): Speculos doesn't
+simulate flash timing, write amplification, or watchdog interaction.
+Functional tests on Speculos validate correctness only. **The host bench
+([bench_phase1.c](bench_phase1.c)) gives ratios but not absolute SE
+timings** — host CPU is ~50× faster than M35P, lockstep adds 20-35%, and
+flash latency is ~10-100× slower than RAM.
 
-**Tasks:**
+### Day 7a: host bench (already done)
 
-1. Update `bench_path_b.c` (or write a new bench) to compare:
-   - baseline (`FNDSA_PATH_B=0, FNDSA_PHASE1_REDUCED=0`)
-   - Path B alone (`FNDSA_PATH_B=1, FNDSA_PHASE1_REDUCED=0`)
-   - Path B + phase 1 (both =1)
-2. Document the perf delta. Phase 1 reduction may cost more than Path B's
-   1-2% if the chosen option involves recomputation or extra FFTs.
+`bench_phase1.c` quantifies the breakeven K (flash:RAM access ratio at
+which option 5 is perf-neutral):
+- logn=10: breakeven K = 6 (flash can be 6× slower and still net-zero)
+- logn=9: breakeven K = ∞ (gram below host timer resolution; any K wins)
 
-**Decision:**
-- Combined perf cost ≤ 5%: **green**
-- Combined cost 5-15%: **orange**, document for deployment decision
-- Cost >15%: **orange/red**, deployment may not accept; consult user
+Use this for the perf MODEL. Hardware bench either confirms or refutes.
 
-**Time:** 1 day.
+### Day 7b: hardware bench (gated on Ledger device access via Q16)
+
+**Required physical setup:** Ledger Stax / Flex / Nano S+ dev kit + GPIO
+toggle (or J-Link cycle counter) for timing. Speculos cannot substitute.
+
+**Required measurements:**
+
+| Measurement | Why | Method |
+|---|---|---|
+| `nvm_write()` per-page latency | Provisioning + watchdog interaction | Single 64-byte `nvm_write()`, average ≥100 pages |
+| Full basis flush (32 KiB at logn=10) | Confirm 0.5-2.7 s estimate | Time `fndsa_setup_basis()` end-to-end |
+| Watchdog interval | Determine if multi-page flush needs kicking | Per Q5/Q6 to Donjon, or empirically measure max chunk |
+| gram_fft latency: basis-in-flash vs RAM | Confirm K ≤ 6 (breakeven) | Two builds: `N_basis` in NV vs `G_basis` in RAM. Same input. Time gram only. |
+| Per-sign latency end-to-end | Confirm Path B's ~1-2% holds + phase 1 doesn't regress | Time `fndsa_sign_with_basis_temp()` over many iters |
+| Lockstep + countermeasures overhead | Check deployment-mode acceptable | Bench with countermeasures disabled (fair compare) then enabled (deployment) |
+| Cache-prefetch during gram_fft | Detect cold-cache penalty | First-sign-after-boot vs steady-state |
+| Per-app NV budget headroom | Confirm 32 KiB fits per Q8 to Donjon | `make load` against real device, observe link errors |
+
+**Decision criteria (hardware-bench-revised):**
+
+| Outcome | Verdict |
+|---|---|
+| Per-sign overhead ≤ 5%, provisioning < 3 s, gram K ≤ 6, 32 KiB fits | **green** — deploy |
+| Per-sign overhead 5-15%, provisioning 3-10 s | **orange** — document; consult Donjon |
+| Per-sign overhead > 15% OR provisioning > 10 s OR watchdog reset OR 32 KiB doesn't fit | **red** — kill; ship Path B alone |
+
+### Output: `c_phase1_validation.md`
+
+1. Host-bench breakeven analysis (from `bench_phase1.c`)
+2. Hardware-bench raw numbers per measurement above
+3. Mapping host predictions → hardware reality
+4. Decision against the criteria
+5. **If green:** deployment runbook (provisioning timing, watchdog kicking pattern, recovery from torn writes)
+6. **If red:** postmortem; ship Path B alone as the final deployable contribution
+
+### Fallback if hardware access is blocked
+
+If a Ledger development device is not available within the Day 7 window:
+- Phase 1 implementation (Days 3-6) proceeds on host (correctness + ASAN validation)
+- Final deployment validation **deferred** until hardware access
+- Upstream PR (Day 10) ships with explicit "deployment validation pending Ledger hardware bench" caveat
+- Path B alone remains the deployable contribution
+
+**Time:** 1-2 days host bench (done), 2-3 days hardware bench (gated).
 
 ## Day 8: Compose with `FNDSA_PATH_B`
 
