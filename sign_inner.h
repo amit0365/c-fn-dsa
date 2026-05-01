@@ -600,6 +600,28 @@ void fpoly_gram_fft(unsigned logn,
 void fpoly_apply_basis(unsigned logn, fpr *t0, fpr *t1,
 	fpr *b01, fpr *b11, const uint16_t *hm);
 
+#if FNDSA_PATH_B
+/* Path B fused finalize: computes
+ *   z1 = merge_fft(zlow, zhigh)        (FFT-domain merge of split form)
+ *   c1 := c1 - z1 * l10                (in place; c1 becomes tb0)
+ *   t1_slot := z1                      (in place; overwrites l10)
+ *
+ * In a single fused loop (no scratch buffer materializing z1 or z1*l10).
+ * This collapses sign_sampler.c step 9's chain of merge_fft + memcpy +
+ * mul_fft + sub + memcpy into one pass, freeing scratch for tighter
+ * recursive Path B layout.
+ *
+ * Constraints:
+ *   - logn >= 2 (called from ffsamp_fft_inner's recursive case).
+ *   - t1_slot initially holds l10 (n FLR, full FFT). On exit holds z1.
+ *   - c1 initially holds c1 = t0 + t1*l10 (n FLR). On exit holds tb0.
+ *   - zlow and zhigh are n/2 FLR each (callee t0/t1 outputs in split form).
+ *   - All four pointers must be pairwise disjoint. */
+#define fpoly_pathb_finalize   fndsa_fpoly_pathb_finalize
+void fpoly_pathb_finalize(unsigned logn, fpr *c1, fpr *t1_slot,
+	const fpr *zlow, const fpr *zhigh);
+#endif
+
 /* ==================================================================== */
 /*
  * Gaussian sampling.

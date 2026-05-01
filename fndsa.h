@@ -231,18 +231,22 @@ size_t fndsa_sign_seeded(const void *sign_key, size_t sign_key_len,
  *
  *    logn   min tmp_len   security
  *   -----------------------------------------
- *      9      30239       standard (level I)
- *     10      60447       standard (level V)
+ *      9      30239       standard (level I)         [26143 with FNDSA_PATH_B]
+ *     10      60447       standard (level V)         [52255 with FNDSA_PATH_B]
  *
  *      2        267       none
- *      3        503       none
- *      4        975       none
- *      5       1919       none
- *      6       3807       none
- *      7       7583       very weak
- *      8      15135       presumed weak
+ *      3        503       none                       [415 with FNDSA_PATH_B]
+ *      4        975       none                       [847 with FNDSA_PATH_B]
+ *      5       1919       none                       [1663 with FNDSA_PATH_B]
+ *      6       3807       none                       [3295 with FNDSA_PATH_B]
+ *      7       7583       very weak                  [6559 with FNDSA_PATH_B]
+ *      8      15135       presumed weak              [13087 with FNDSA_PATH_B]
  *
- * (Formula is: 59*n+31 bytes, for degree n = 2^logn)
+ * (Default formula: 59*n+31 bytes, for degree n = 2^logn.
+ *  With FNDSA_PATH_B compile flag: 51*n+31 bytes — saves 8n bytes per
+ *  signing via the t0+t1*l10 absorption + tight 24-quarter ffsamp layout.
+ *  Bit-exact KAT compat at logn>=3, ~1-2% perf overhead. logn=2 not
+ *  supported under PATH_B due to FP edge cases at n=4.)
  *
  * An undersized temporary area triggers an error (returned value is zero).
  */

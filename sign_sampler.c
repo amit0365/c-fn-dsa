@@ -1248,6 +1248,95 @@ ffsamp_fft_inner(sampler_state *ss, unsigned logn, fpr *tmp)
 	   the callee receives half the space for half the degree. */
 #define qc(off)   (tmp + ((off) << (logn - 2)))
 
+#if FNDSA_PATH_B
+	/* ============================================================
+	 * Path B body. See inner.h's FNDSA_PATH_B comment for the design.
+	 *
+	 * Layout at the recursive call (vs baseline 28-quarter layout):
+	 *   0..3   c1 = t0 + t1*l10  (persistent across right recursion;
+	 *                             replaces baseline's separate t0 and t1)
+	 *   4..7   l10                (persistent; needed post-recursion)
+	 *   8..9   d00                (self-adjoint, persistent)
+	 *   10..11 callee t0 (= split-low of t1)
+	 *   12..13 callee t1 (= split-high of t1)
+	 *   14..15 right_01           (= callee g01)
+	 *   16     right_00           (= callee g00, self-adjoint)
+	 *   17     right_11           (= callee g11, self-adjoint = right_00)
+	 *   18..23 callee free scratch
+	 *
+	 * The fused fpoly_pathb_finalize primitive (sign_fpoly.c) computes
+	 * tb0 = c1 - z1*l10 and stores z1 in the t1 slot in a single pass,
+	 * eliminating the qc(14..21) scratch the un-fused chain would need.
+	 * After this fix, the function-internal peak is 21 outer-q (5.25n FLR)
+	 * — though sign_core's overall tmp[] is still bound by phase 1's 6n
+	 * FLR basis layout, so user-visible savings remain 1n (vs baseline's
+	 * 7n peak). The 21-q internal peak is dormant capability for future
+	 * phase-1 reductions. */
+
+	/* Step 1: LDL (same as baseline). */
+	fpoly_LDL_fft(logn, qc(12), qc(8), qc(14));
+
+	/* Step 2: t1*l10 -> scratch qc(16..19). */
+	memcpy(qc(16), qc(4), sizeof(fpr) << logn);
+	fpoly_mul_fft(logn, qc(16), qc(8));
+
+	/* Step 3: c1 := t0 + (t1*l10), in place at qc(0..3). */
+	fpoly_add(logn, qc(0), qc(16));
+
+	/* Step 4 (recursive Path B): l10 save -> qc(16..19) (free after step 3
+	   consumes t1*l10 product), d00 moved DIRECTLY from qc(12..13) -> qc(8..9)
+	   (overwrites stale l10 first half — l10 is backed up at qc(16..19) so
+	   safe). No scratch beyond qc(16..19); qc(20..23) untouched. */
+	memcpy(qc(16), qc(8), sizeof(fpr) << logn);          /* l10 save: 4 outer-q */
+	memcpy(qc(8), qc(12), sizeof(fpr) << (logn - 1));    /* d00 direct move: 2 outer-q */
+
+	/* Step 5: split t1 -> callee positions (qc(10..11), qc(12..13)).
+	   Non-destructive read of t1 from qc(4..7); writes overwrite stale
+	   l10 second half + stale d00 (both safe — l10 backed up, d00 moved). */
+	fpoly_split_fft(logn, qc(10), qc(12), qc(4));
+
+	/* Step 6: restore l10 -> qc(4..7) (overwrites stale t1; t1 dead after
+	   split). qc(16..19) becomes stale l10 (logically dead). */
+	memcpy(qc(4), qc(16), sizeof(fpr) << logn);
+
+	/* Step 7: split d11 with output at callee positions. Now that qc(16..19)
+	   is free, we can use qc(18..19) as the d11-save scratch (aliasing
+	   workaround for split_selfadj's f1==f issue) and write split outputs
+	   to qc(14..17) without conflict. */
+	memcpy(qc(18), qc(14), sizeof(fpr) << (logn - 1));   /* d11 save scratch */
+	fpoly_split_selfadj_fft(logn, qc(16), qc(14), qc(18));
+	memcpy(qc(17), qc(16), sizeof(fpr) << (logn - 2));
+
+	/* Pre-recursion layout (24-quarter Path B):
+	      0..3   c1, 4..7  l10, 8..9  d00,
+	      10..11 ce_t0, 12..13 ce_t1,
+	      14..15 right_01, 16 right_00, 17 right_11,
+	      18..23 callee free scratch */
+
+	/* Step 8: first recursive call — callee tmp = qc(10). */
+	ffsamp_fft_inner(ss, logn - 1, qc(10));
+
+	/* Step 9 (recursive Path B): tb0 = c1 - z1*l10; z1 -> t1 slot.
+	   Fused into fpoly_pathb_finalize: no qc(14..21) scratch needed.
+	   This removes the 8 outer-q scratch usage that blocked recursive
+	   Path B's tighter layout. */
+	fpoly_pathb_finalize(logn, qc(0), qc(4), qc(10), qc(12));
+
+	/* Step 10: split d00 -> left subtree at callee positions. */
+	fpoly_split_selfadj_fft(logn, qc(16), qc(14), qc(8));
+	memcpy(qc(17), qc(16), sizeof(fpr) << (logn - 2));
+
+	/* Step 11: split tb0 -> callee positions. */
+	fpoly_split_fft(logn, qc(10), qc(12), qc(0));
+
+	/* Step 12: second recursive call. */
+	ffsamp_fft_inner(ss, logn - 1, qc(10));
+
+	/* Step 13: final merge of z0 into qc(0..3). */
+	fpoly_merge_fft(logn, qc(0), qc(10), qc(12));
+
+#else /* !FNDSA_PATH_B (baseline) */
+
 	/* Decompose G into LDL; the decomposed matrix replaces G. */
 	fpoly_LDL_fft(logn, qc(12), qc(8), qc(14));
 
@@ -1324,6 +1413,8 @@ ffsamp_fft_inner(sampler_state *ss, unsigned logn, fpr *tmp)
 	fpoly_split_fft(logn, qc(14), qc(16), qc(0));
 	ffsamp_fft_inner(ss, logn - 1, qc(14));
 	fpoly_merge_fft(logn, qc(0), qc(14), qc(16));
+
+#endif /* FNDSA_PATH_B */
 
 #undef qc
 }

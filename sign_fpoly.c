@@ -2704,9 +2704,226 @@ fpoly_apply_basis(unsigned logn, fpr *t0, fpr *t1,
 	}
 #endif
 	fpoly_FFT(logn, t0);
+#if FNDSA_PATH_B
+	/* Path B: preserve b01 input so sign_core's reordered phase 1 can
+	   pass it to gram_fft AFTER apply_basis. Costs one extra n-FLR
+	   memcpy (t1 := b01 first, then t1 *= t0) compared to the baseline
+	   which destroys b01 in place. The savings come from eliminating
+	   the t2 backup in sign_core that the baseline needs precisely
+	   because b01 is destroyed. */
+	memcpy(t1, b01, n * sizeof(fpr));
+	fpoly_mul_fft(logn, t1, t0);
+	fpoly_mul_fft(logn, t0, b11);
+#else
 	fpoly_mul_fft(logn, b01, t0);
 	fpoly_mul_fft(logn, t0, b11);
 	memmove(t1, b01, n * sizeof(fpr));
+#endif
 	fpoly_mulconst(logn, t1, MINUS_INV_Q);
 	fpoly_mulconst(logn, t0, INV_Q);
 }
+
+#if FNDSA_PATH_B
+/* see sign_inner.h.
+ *
+ * Per outer-loop iteration on i in [0, qn):
+ *   - Load split-form z1 components: zlow[i], zlow[i+qn], zhigh[i], zhigh[i+qn]
+ *   - Load twiddle: GM[(i+hn)*2..]
+ *   - Compute c = b * s    (complex mul: b = zhigh, s = twiddle)
+ *   - Compute z[2i]   = a + c    (a = zlow,  per-element split-merge formula)
+ *   - Compute z[2i+1] = a - c
+ *   - Read l10[2i, 2i+hn, 2i+1, 2i+1+hn] from t1_slot (BEFORE writing z back)
+ *   - Compute p[2i]   = z[2i]   * l10[2i]   (complex mul)
+ *   - Compute p[2i+1] = z[2i+1] * l10[2i+1]
+ *   - Subtract p from c1 in place: c1[2i,..] -= p[2i,..]  (c1 becomes tb0)
+ *   - Write z to t1_slot in place (overwrites l10)
+ *
+ * Within an iteration, all l10 reads happen before z writes to t1_slot.
+ * Across iterations, indices are disjoint, so no aliasing concerns. */
+TARGET_SSE2 TARGET_NEON
+void
+fpoly_pathb_finalize(unsigned logn, fpr *c1, fpr *t1_slot,
+	const fpr *zlow, const fpr *zhigh)
+{
+	size_t hn = (size_t)1 << (logn - 1);
+	size_t qn = hn >> 1;
+
+#if FNDSA_SSE2
+	const double *zl = (const double *)zlow;
+	const double *zh = (const double *)zhigh;
+	double *cc = (double *)c1;
+	double *tt = (double *)t1_slot;
+	__m128d cz = _mm_castsi128_pd(_mm_setr_epi32(0, 0, 0, -0x80000000));
+	for (size_t i = 0; i < qn; i ++) {
+		__m128d a_re = _mm_load_sd(zl + i);
+		__m128d a_im = _mm_load_sd(zl + i + qn);
+		__m128d b_re = _mm_load_sd(zh + i);
+		__m128d b_im = _mm_load_sd(zh + i + qn);
+
+		__m128d s = _mm_loadu_pd(
+			(const double *)GM + ((i + hn) << 1));
+		__m128d c1v = _mm_mul_pd(s,
+			_mm_shuffle_pd(b_re, b_im, 0));
+		__m128d c2v = _mm_mul_pd(s,
+			_mm_shuffle_pd(b_im, b_re, 0));
+
+		/* c_re_pkd = [c_re, -c_re], c_im_pkd = [c_im, -c_im] */
+		__m128d c_re_pkd = _mm_sub_pd(c1v,
+			_mm_shuffle_pd(c1v, c1v, 1));
+		__m128d c_im_pkd = _mm_xor_pd(cz,
+			_mm_add_pd(c2v, _mm_shuffle_pd(c2v, c2v, 1)));
+
+		/* z packed: z_re = [z0_re, z1_re], z_im = [z0_im, z1_im] */
+		__m128d z_re = _mm_add_pd(c_re_pkd,
+			_mm_shuffle_pd(a_re, a_re, 0));
+		__m128d z_im = _mm_add_pd(c_im_pkd,
+			_mm_shuffle_pd(a_im, a_im, 0));
+
+		/* Load l10 (BEFORE writing z back) */
+		__m128d l_re = _mm_loadu_pd(tt + (i << 1));
+		__m128d l_im = _mm_loadu_pd(tt + (i << 1) + hn);
+
+		/* p = z * l10 (per-element complex mul) */
+		__m128d p_re = _mm_sub_pd(
+			_mm_mul_pd(z_re, l_re),
+			_mm_mul_pd(z_im, l_im));
+		__m128d p_im = _mm_add_pd(
+			_mm_mul_pd(z_re, l_im),
+			_mm_mul_pd(z_im, l_re));
+
+		/* tb0 = c1 - p */
+		__m128d cc_re = _mm_loadu_pd(cc + (i << 1));
+		__m128d cc_im = _mm_loadu_pd(cc + (i << 1) + hn);
+		_mm_storeu_pd(cc + (i << 1), _mm_sub_pd(cc_re, p_re));
+		_mm_storeu_pd(cc + (i << 1) + hn,
+			_mm_sub_pd(cc_im, p_im));
+
+		/* z -> t1_slot (overwrites l10) */
+		_mm_storeu_pd(tt + (i << 1), z_re);
+		_mm_storeu_pd(tt + (i << 1) + hn, z_im);
+	}
+#elif FNDSA_NEON
+	static const union { fpr f[2]; uint64x2_t w; }
+		cz = { { FPR_ZERO, FPR_NZERO } };
+	const float64_t *zl = (const float64_t *)zlow;
+	const float64_t *zh = (const float64_t *)zhigh;
+	float64_t *cc = (float64_t *)c1;
+	float64_t *tt = (float64_t *)t1_slot;
+	for (size_t i = 0; i < qn; i ++) {
+		float64x1_t a_re = vld1_f64(zl + i);
+		float64x1_t a_im = vld1_f64(zl + i + qn);
+		float64x1_t b_re = vld1_f64(zh + i);
+		float64x1_t b_im = vld1_f64(zh + i + qn);
+		float64x2_t b = vcombine_f64(b_re, b_im);
+
+		float64x2_t s = vld1q_f64(
+			(const float64_t *)GM + ((i + hn) << 1));
+		float64x2_t c1v = vmulq_f64(s, b);
+		float64x2_t c2v = vmulq_f64(s, vextq_f64(b, b, 1));
+
+		float64x2_t c_re_pkd = vsubq_f64(c1v,
+			vextq_f64(c1v, c1v, 1));
+		float64x2_t c_im_pkd = vreinterpretq_f64_u64(
+			veorq_u64(cz.w, vreinterpretq_u64_f64(
+				vaddq_f64(c2v,
+					vextq_f64(c2v, c2v, 1)))));
+
+		/* z packed: z_re = [z0_re, z1_re], z_im = [z0_im, z1_im] */
+		float64x2_t z_re = vaddq_f64(c_re_pkd,
+			vdupq_lane_f64(a_re, 0));
+		float64x2_t z_im = vaddq_f64(c_im_pkd,
+			vdupq_lane_f64(a_im, 0));
+
+		/* Load l10 (BEFORE writing z back) */
+		float64x2_t l_re = vld1q_f64(tt + (i << 1));
+		float64x2_t l_im = vld1q_f64(tt + (i << 1) + hn);
+
+		/* p = z * l10 */
+		float64x2_t p_re = vsubq_f64(
+			vmulq_f64(z_re, l_re),
+			vmulq_f64(z_im, l_im));
+		float64x2_t p_im = vaddq_f64(
+			vmulq_f64(z_re, l_im),
+			vmulq_f64(z_im, l_re));
+
+		/* tb0 = c1 - p */
+		float64x2_t cc_re = vld1q_f64(cc + (i << 1));
+		float64x2_t cc_im = vld1q_f64(cc + (i << 1) + hn);
+		vst1q_f64(cc + (i << 1), vsubq_f64(cc_re, p_re));
+		vst1q_f64(cc + (i << 1) + hn, vsubq_f64(cc_im, p_im));
+
+		/* z -> t1_slot */
+		vst1q_f64(tt + (i << 1), z_re);
+		vst1q_f64(tt + (i << 1) + hn, z_im);
+	}
+#elif FNDSA_RV64D
+	const f64 *zl = (const f64 *)zlow;
+	const f64 *zh = (const f64 *)zhigh;
+	f64 *cc = (f64 *)c1;
+	f64 *tt = (f64 *)t1_slot;
+	for (size_t i = 0; i < qn; i ++) {
+		f64 a_re = zl[i], a_im = zl[i + qn];
+		f64 b_re = zh[i], b_im = zh[i + qn];
+		f64 s_re = ((const f64 *)GM)[((i + hn) << 1) + 0];
+		f64 s_im = ((const f64 *)GM)[((i + hn) << 1) + 1];
+
+		f64 c_re = f64_sub(f64_mul(b_re, s_re), f64_mul(b_im, s_im));
+		f64 c_im = f64_add(f64_mul(b_im, s_re), f64_mul(b_re, s_im));
+		f64 z0_re = f64_add(a_re, c_re), z0_im = f64_add(a_im, c_im);
+		f64 z1_re = f64_sub(a_re, c_re), z1_im = f64_sub(a_im, c_im);
+
+		f64 l0_re = tt[(i << 1) + 0],      l0_im = tt[(i << 1) + 0 + hn];
+		f64 l1_re = tt[(i << 1) + 1],      l1_im = tt[(i << 1) + 1 + hn];
+
+		f64 p0_re = f64_sub(f64_mul(z0_re, l0_re), f64_mul(z0_im, l0_im));
+		f64 p0_im = f64_add(f64_mul(z0_re, l0_im), f64_mul(z0_im, l0_re));
+		f64 p1_re = f64_sub(f64_mul(z1_re, l1_re), f64_mul(z1_im, l1_im));
+		f64 p1_im = f64_add(f64_mul(z1_re, l1_im), f64_mul(z1_im, l1_re));
+
+		cc[(i << 1) + 0]      = f64_sub(cc[(i << 1) + 0],      p0_re);
+		cc[(i << 1) + 0 + hn] = f64_sub(cc[(i << 1) + 0 + hn], p0_im);
+		cc[(i << 1) + 1]      = f64_sub(cc[(i << 1) + 1],      p1_re);
+		cc[(i << 1) + 1 + hn] = f64_sub(cc[(i << 1) + 1 + hn], p1_im);
+
+		tt[(i << 1) + 0]      = z0_re;
+		tt[(i << 1) + 0 + hn] = z0_im;
+		tt[(i << 1) + 1]      = z1_re;
+		tt[(i << 1) + 1 + hn] = z1_im;
+	}
+#else
+	/* Scalar fallback (uses fpr_* primitives, available on this build). */
+	for (size_t i = 0; i < qn; i ++) {
+		fpr a_re = zlow[i], a_im = zlow[i + qn];
+		fpr b_re = zhigh[i], b_im = zhigh[i + qn];
+
+		fpr s_re = GM[((i + hn) << 1) + 0];
+		fpr s_im = GM[((i + hn) << 1) + 1];
+		fpr c_re, c_im;
+		FPC_MUL(c_re, c_im, b_re, b_im, s_re, s_im);
+
+		fpr z0_re, z1_re, z0_im, z1_im;
+		FPR_ADD_SUB(z0_re, z1_re, a_re, c_re);
+		FPR_ADD_SUB(z0_im, z1_im, a_im, c_im);
+
+		fpr l0_re = t1_slot[(i << 1) + 0];
+		fpr l0_im = t1_slot[(i << 1) + 0 + hn];
+		fpr l1_re = t1_slot[(i << 1) + 1];
+		fpr l1_im = t1_slot[(i << 1) + 1 + hn];
+
+		fpr p0_re, p0_im, p1_re, p1_im;
+		FPC_MUL(p0_re, p0_im, z0_re, z0_im, l0_re, l0_im);
+		FPC_MUL(p1_re, p1_im, z1_re, z1_im, l1_re, l1_im);
+
+		c1[(i << 1) + 0]      = fpr_sub(c1[(i << 1) + 0],      p0_re);
+		c1[(i << 1) + 0 + hn] = fpr_sub(c1[(i << 1) + 0 + hn], p0_im);
+		c1[(i << 1) + 1]      = fpr_sub(c1[(i << 1) + 1],      p1_re);
+		c1[(i << 1) + 1 + hn] = fpr_sub(c1[(i << 1) + 1 + hn], p1_im);
+
+		t1_slot[(i << 1) + 0]      = z0_re;
+		t1_slot[(i << 1) + 0 + hn] = z0_im;
+		t1_slot[(i << 1) + 1]      = z1_re;
+		t1_slot[(i << 1) + 1 + hn] = z1_im;
+	}
+#endif
+}
+#endif /* FNDSA_PATH_B */

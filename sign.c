@@ -28,7 +28,11 @@ sign_step1(unsigned logn, const uint8_t *sign_key,
 	int8_t *f = (int8_t *)tmp + 4 * n;
 	int8_t *g = f + n;
 	int8_t *F = g + n;
+#if FNDSA_PATH_B
+	int8_t *G = (int8_t *)tmp + ((size_t)50 << logn);
+#else
 	int8_t *G = (int8_t *)tmp + ((size_t)58 << logn);
+#endif
 
 	/* Decode the private key. Header byte and length have already
 	   been verified. */
@@ -126,6 +130,11 @@ sign_step1(unsigned logn, const uint8_t *sign_key,
 
 /* Custom wrappers to allocate the temporary buffers on the stack. Several
    wrappers are defined so that stack allocation is not always worst-case. */
+#if FNDSA_PATH_B
+#define SIGN_WRAP_TMP_FACTOR  51
+#else
+#define SIGN_WRAP_TMP_FACTOR  59
+#endif
 #define SIGN_WRAP(sz)   \
 	static size_t sign_ ## sz(unsigned logn, \
 		const uint8_t *sign_key, \
@@ -134,7 +143,7 @@ sign_step1(unsigned logn, const uint8_t *sign_key,
 		const uint8_t *seed, size_t seed_len, \
 		uint8_t *sig) \
 	{ \
-		uint8_t tmp[(sz) * 59 + 31]; \
+		uint8_t tmp[(sz) * SIGN_WRAP_TMP_FACTOR + 31]; \
 		return sign_step1(logn, \
 			sign_key, ctx, ctx_len, id, hv, hv_len, \
 			seed, seed_len, sig, tmp); \
@@ -214,9 +223,15 @@ sign_wrapper(int weak,
 				seed, seed_len, sig);
 		}
 	} else {
+#if FNDSA_PATH_B
+		if (tmp_len < (((size_t)51 << logn) + 31)) {
+			return 0;
+		}
+#else
 		if (tmp_len < (((size_t)59 << logn) + 31)) {
 			return 0;
 		}
+#endif
 		return sign_step1(logn,
 			sign_key, ctx, ctx_len, id, hv, hv_len,
 			seed, seed_len, sig, tmp);

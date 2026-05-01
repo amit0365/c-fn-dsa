@@ -137,8 +137,15 @@ sign_core(unsigned logn,
 			shake_extract(sc, rndp, rndlen);
 		}
 
-		/* Hash the message into a polynomial. */
+		/* Hash the message into a polynomial. With Path B + phase 1
+		   reorder, hm slides to offset 48n (after 6n FLR phase 1 peak).
+		   Recursive Path B reduces ffsamp peak to 5.25n FLR but phase 1
+		   still binds at 6n FLR, so hm stays at 48n. */
+#if FNDSA_PATH_B
+		uint16_t *hm = (uint16_t *)((uint8_t *)tmp + 48 * n);
+#else
 		uint16_t *hm = (uint16_t *)((uint8_t *)tmp + 56 * n);
+#endif
 		hash_to_point(logn, nonce, hashed_vk,
 			ctx, ctx_len, id, hv, hv_len, hm);
 
@@ -173,6 +180,25 @@ sign_core(unsigned logn,
 		fpr *b01 = b00 + n;
 		fpr *b10 = b01 + n;
 		fpr *b11 = b10 + n;
+#if FNDSA_PATH_B
+		/* Path B phase 1 reorder: apply_basis runs BEFORE gram_fft so
+		   it can read the live b01 directly (rather than from a separate
+		   1n-FLR backup t2 that the baseline maintains). The modified
+		   apply_basis (sign_fpoly.c) preserves b01 in this build, so
+		   gram_fft afterwards sees the original basis polynomials.
+		   The compact rearrange uses b11 as scratch instead of t1
+		   (since t1 now holds the target output of apply_basis). */
+		fpoly_apply_basis(logn, t0, t1, b01, b11, hm);
+		fpoly_gram_fft(logn, b00, b01, b10, b11);
+		fpr *g01 = b00;
+		fpr *g00 = b01;
+		fpr *g11 = b01 + hn;
+		fpr *scratch_hn = b11;  /* b11 dead after gram_fft */
+		memcpy(scratch_hn, b00, hn * sizeof(fpr));
+		memcpy(g01, b01, n * sizeof(fpr));
+		memcpy(g00, scratch_hn, hn * sizeof(fpr));
+		memcpy(g11, b10, hn * sizeof(fpr));
+#else
 		fpr *t2 = b11 + n;
 		memcpy(t2, b01, n * sizeof(fpr));
 		fpoly_gram_fft(logn, b00, b01, b10, b11);
@@ -200,6 +226,7 @@ sign_core(unsigned logn,
 		   normalization with regard to the modulus q).
 		   b11 is unchanged, but b01 is in t2. */
 		fpoly_apply_basis(logn, t0, t1, t2, b11, hm);
+#endif
 
 		/* Current layout:
 		      t0  (n)

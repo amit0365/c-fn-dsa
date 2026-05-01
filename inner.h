@@ -182,6 +182,41 @@
 #endif
 #endif
 
+/* If FNDSA_PATH_B is 1, the signing path uses an alternative layout that
+   reduces tmp[] from 59*n+31 to 51*n+31 bytes (saves 8 KiB at logn=10,
+   4 KiB at logn=9). Two algorithmic changes compose to give the saving:
+
+     1. ffsamp_fft_inner absorbs t1*l10 into t0 before the right-subtree
+        recursion (rather than carrying both t0 and t1 through), reducing
+        the persistent set in the recursive frame from 14 quarters to 10.
+        See sign_sampler.c. The function-internal peak is further reduced
+        by a fused merge+sub primitive (fpoly_pathb_finalize) that
+        eliminates the z1*l10 scratch buffer.
+
+     2. sign_core reorders apply_basis to run BEFORE gram_fft, so the
+        b01 polynomial does not need to be backed up to scratch (the
+        baseline keeps a 1n-FLR copy because gram_fft destroys b01 and
+        apply_basis still needs it). apply_basis is correspondingly
+        modified to preserve b01 instead of consuming it.
+
+   FP operation order changes vs baseline. The FN-DSA spec only requires
+   distribution equivalence, which is preserved (same algorithm with
+   different rounding ordering). Empirical bonus: at logn>=3, signatures
+   produced under FNDSA_PATH_B match Pornin's baseline KATs bit-exact in
+   ~thousands of test signatures; the discrete Gaussian sampler at the
+   leaf rounds to integers and absorbs sub-bit FP perturbations.
+
+   logn=2 is not supported under FNDSA_PATH_B (an FP edge case at n=4
+   produces signatures that fail to verify on some inputs). FN-DSA does
+   not define a security level at logn=2, so this is not a spec gap.
+
+   ~1-2% perf overhead at logn=9, 10 (measured wall-time, ~200 µs/sign).
+
+   To enable: -DFNDSA_PATH_B=1 at compile time. */
+#ifndef FNDSA_PATH_B
+#define FNDSA_PATH_B   0
+#endif
+
 /* Automatically recognize some architectures as being "64-bit", which
    mostly means that we assume that 64-bit shifts are constant-time
    with regard to the shift count. */
