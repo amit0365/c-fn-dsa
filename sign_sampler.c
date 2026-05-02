@@ -1278,28 +1278,35 @@ ffsamp_fft_inner(sampler_state *ss, unsigned logn, fpr *tmp)
 		   d00 unchanged at qc(12..13). */
 		fpoly_LDL_fft(logn, qc(12), qc(8), qc(14));
 
-		/* Step 2: t1 * l10 → scratch qc(16..19). t1 is read from
-		   qc(4..7) non-destructively. */
-		memcpy(qc(16), qc(4), sizeof(fpr) << logn);
-		fpoly_mul_fft(logn, qc(16), qc(8));
+		/* Step 2 (Path A fused MAC): c1 = t0 + t1·l10 in place at
+		   qc(0..3). Uses fpoly_mac_fft (per-coefficient complex MAC)
+		   with NO scratch beyond registers — eliminates the qc(16..19)
+		   t1*l10 product slot that the un-fused chain would need. This
+		   is what keeps the function-internal peak at 4n FLR. */
+		fpoly_mac_fft(logn, qc(0), qc(4), qc(8));
 
-		/* Step 3: c1 = t0 + (t1*l10), in place at qc(0..3). */
-		fpoly_add(logn, qc(0), qc(16));
+		/* Step 3: relocate t1 to qc(8..11), overwriting stale l10
+		   (no longer needed after step 2 consumed it). Now qc(4..7)
+		   becomes free scratch for step 4's split outputs. */
+		memcpy(qc(8), qc(4), sizeof(fpr) << logn);
 
-		/* Step 4: save t1 to scratch at qc(16..19) before we overwrite
-		   qc(4..5) with d00. (qc(16..19) is dirty from step 2 but the
-		   t1*l10 product is no longer needed after step 3 consumed it.) */
-		memcpy(qc(16), qc(4), sizeof(fpr) << logn);
+		/* Step 4: split t1 from qc(8..11) → ce_t0 at qc(6..7), ce_t1
+		   at qc(4..5). Source and both destinations are disjoint
+		   (qc(8..11) vs qc(6..7) and qc(4..5)). */
+		fpoly_split_fft(logn, qc(6), qc(4), qc(8));
 
-		/* Step 5: relocate d00 from qc(12..13) → qc(4..5). l10 at
-		   qc(8..11) is dropped (will be recomputed post-recursion). */
+		/* Step 5: ce_t1 needs to land at qc(8..9) per the callee's
+		   expected input layout (callee qc'(4..7) at L−1 = parent
+		   qc(8..9)). Move it there from qc(4..5). qc(4..5) becomes
+		   free for d00 in step 6. */
+		memcpy(qc(8), qc(4), sizeof(fpr) << (logn - 1));
+
+		/* Step 6: relocate d00 from qc(12..13) → qc(4..5). After
+		   this, qc(12..13) becomes free for the d11 split's right_00
+		   destination in step 7. l10 at the now-stale qc(8..11) was
+		   dropped in step 3; we'll recompute it post-recursion via
+		   external_basis. */
 		memcpy(qc(4), qc(12), sizeof(fpr) << (logn - 1));
-
-		/* Step 6: split t1 → callee positions qc(6..9). Reading from
-		   the qc(16..19) scratch (saved in step 4); writing to
-		   qc(6..7) (ce_t0) and qc(8..9) (ce_t1). Source and destination
-		   are disjoint (qc(16..19) vs qc(6..9)). */
-		fpoly_split_fft(logn, qc(6), qc(8), qc(16));
 
 		/* Step 7: split d11 → callee gram positions. d11 is at
 		   qc(14..15); split into right_01 (½n at qc(10..11)) +

@@ -229,24 +229,27 @@ size_t fndsa_sign_seeded(const void *sign_key, size_t sign_key_len,
  * systems that have only small stacks. Temporary area sizes are as
  * follows:
  *
- *    logn   min tmp_len   security                   [PATH_B]   [PATH_B+basis]
- *   ----------------------------------------------------------------------------
- *      9      30239       standard (level I)            26143       22047
- *     10      60447       standard (level V)            52255       44063
+ *    logn   min tmp_len   security                   [PATH_B]   [PATH_B+basis]   [+FFSAMP_5N]
+ *   ------------------------------------------------------------------------------------------
+ *      9      30239       standard (level I)            26143       22047            18975
+ *     10      60447       standard (level V)            52255       44063            37919
  *
- *      2        267       none                          (n/a)       (n/a)
- *      3        503       none                            415       (n/a)
- *      4        975       none                            847       (n/a)
- *      5       1919       none                           1663       (n/a)
- *      6       3807       none                           3295       (n/a)
- *      7       7583       very weak                      6559       (n/a)
- *      8      15135       presumed weak                 13087       (n/a)
+ *      2        267       none                          (n/a)       (n/a)            (n/a)
+ *      3        503       none                            415       (n/a)            (n/a)
+ *      4        975       none                            847       (n/a)            (n/a)
+ *      5       1919       none                           1663       (n/a)            (n/a)
+ *      6       3807       none                           3295       (n/a)            (n/a)
+ *      7       7583       very weak                      6559       (n/a)            (n/a)
+ *      8      15135       presumed weak                 13087       (n/a)            (n/a)
  *
  * Formulas (n = 2^logn):
- *   Default                              : 59n+31 bytes
- *   With FNDSA_PATH_B                    : 51n+31 bytes  (saves 8n bytes/sign)
- *   With FNDSA_PATH_B + precomputed basis: 43n+31 bytes  (saves 16n bytes/sign,
- *                                                          uses fndsa_*_with_basis_temp)
+ *   Default                                 : 59n+31 bytes
+ *   With FNDSA_PATH_B                       : 51n+31 bytes  (saves 8n bytes/sign)
+ *   With FNDSA_PATH_B + precomputed basis   : 43n+31 bytes  (saves 16n bytes/sign,
+ *                                                            uses fndsa_*_with_basis_temp)
+ *   With FNDSA_PATH_B + basis + FFSAMP_5N   : 37n+31 bytes  (saves 22n bytes/sign;
+ *                                                            ffsamp outer peak 4n FLR
+ *                                                            via Path A l10 recompute)
  *
  * FNDSA_PATH_B notes:
  *   Uses the t0+t1*l10 absorption + tight 24-quarter ffsamp layout.

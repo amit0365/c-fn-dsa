@@ -158,14 +158,26 @@ sign_core(unsigned logn,
 		                                                  FLR via l10
 		                                                  recompute) */
 #if FNDSA_PHASE1_REDUCED
-		/* hm offset under FNDSA_FFSAMP_5N_REDUCED stays at 40n for
-		   now. The Path A outer body's step 2 uses qc(16..19) as
-		   t1*l10 scratch — keeping the FUNCTION-INTERNAL peak at 5n
-		   FLR. Achieving the documented 4n peak (and the corresponding
-		   35n+31 byte tmp_len) requires a new fpoly_mac_fft fused
-		   primitive that does c1 += t1*l10 in place without scratch.
-		   Day 4+ work. */
-		size_t hm_offset_n = (external_basis != NULL) ? 40 : 48;
+		/* hm offset:
+		     external_basis NULL:               48n bytes
+		     PATH_B + basis (43n+31):           40n bytes
+		     PATH_B + basis + FFSAMP_5N (37n+31): 34n bytes
+		           (Path A: ffsamp peak = 4n FLR at outer level via
+		           fpoly_mac_fft fused primitive; FP-stays post-ffsamp
+		           scratch ends at byte 34n, so hm at 34n is the first
+		           safe slot. tmp_len = 37n+31 reserves 2 extra bytes
+		           per n above what scalar/integer post-ffsamp needs —
+		           acceptable for a single API min.) */
+		size_t hm_offset_n;
+		if (external_basis != NULL) {
+#if FNDSA_FFSAMP_5N_REDUCED
+			hm_offset_n = 34;
+#else
+			hm_offset_n = 40;
+#endif
+		} else {
+			hm_offset_n = 48;
+		}
 		uint16_t *hm = (uint16_t *)((uint8_t *)tmp + hm_offset_n * n);
 #elif FNDSA_PATH_B
 		uint16_t *hm = (uint16_t *)((uint8_t *)tmp + 48 * n);

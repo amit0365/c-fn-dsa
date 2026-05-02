@@ -9,20 +9,17 @@
  *     vrfy.o -lm
  *
  * Strategy: allocate tmp[] at the LARGER PATH_B-only size (51n+31 bytes), paint
- * the bytes [43n, 51n+31) — which Path A's API claims it does not need — with
- * a sentinel pattern, then run a full signing round via the public
- * fndsa_sign_seeded_with_basis_temp API, passing 43n+31 as tmp_len. After the
+ * the bytes [37n, 51n+31) — which Path A's 4n FLR peak claim says it does not
+ * need — with a sentinel pattern, then run a full signing round via the public
+ * fndsa_sign_seeded_with_basis_temp API, passing 37n+31 as tmp_len. After the
  * call, verify the painted region is byte-identical to the sentinel.
  *
- * NOTE: Path A's CURRENT implementation (Day 1+2) uses qc(16..19) as t1*l10
- * scratch in step 2 of the outer body, keeping the function-internal peak at
- * 5n FLR (same as PATH_B+PHASE1_REDUCED). Achieving the documented 4n peak
- * and the corresponding 35n+31 byte tmp_len requires a new fpoly_mac_fft
- * fused primitive — see kill plan Day 4+. This test verifies the CURRENT
- * boundary (43n+31) is honored, not the future tighter one.
- *
- * Once the fpoly_mac_fft primitive lands, this test will be tightened to
- * paint at offset 35n (the actual 4n FLR boundary) instead of 43n. */
+ * Path A's outer-level body uses fpoly_mac_fft (per-coefficient complex
+ * multiply-accumulate) in step 2 to compute c1 += t1·l10 in place at qc(0..3),
+ * eliminating the qc(16..19) t1*l10 product slot that the un-fused chain
+ * needed. This is what brings the function-internal peak from 5n FLR to 4n
+ * FLR. The 37n+31 boundary = 4n FLR ffsamp + 2n bytes FP-stays-extra +
+ * 2n bytes hm + n bytes G + 31. */
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -42,12 +39,12 @@ test_at_logn(unsigned logn)
 	size_t basis_len = FNDSA_BASIS_SIZE(logn);
 
 	/* Allocate at the PATH_B-only (no phase 1 reduction) size 51n+31,
-	   pass 43n+31 as the API tmp_len. The bytes [43n, 51n+31) should
+	   pass 37n+31 as the API tmp_len. The bytes [37n, 51n+31) should
 	   be untouched by the new outer-level body — that's the load-bearing
-	   correctness claim. */
+	   correctness claim for Path A's 4n FLR peak. */
 	size_t large_tmp_len = ((size_t)51 << logn) + 31;
-	size_t reduced_tmp_len = ((size_t)43 << logn) + 31;
-	size_t paint_offset = (size_t)43 << logn;
+	size_t reduced_tmp_len = ((size_t)37 << logn) + 31;
+	size_t paint_offset = (size_t)37 << logn;
 	size_t paint_size = large_tmp_len - paint_offset;
 
 	uint8_t *sk = malloc(sk_len);
@@ -97,7 +94,7 @@ test_at_logn(unsigned logn)
 			violations++;
 			if (violations <= 3) {
 				fprintf(stderr,
-					"logn=%u: violation at byte %zu (offset 43n+%zu): "
+					"logn=%u: violation at byte %zu (offset 37n+%zu): "
 					"got 0x%02x\n",
 					logn, paint_offset + i, i,
 					tmp[paint_offset + i]);
@@ -109,14 +106,14 @@ test_at_logn(unsigned logn)
 
 	if (violations > 0) {
 		fprintf(stderr,
-			"logn=%u: FAIL — %d/%zu bytes in [43n, 51n+31) modified\n",
+			"logn=%u: FAIL — %d/%zu bytes in [37n, 51n+31) modified\n",
 			logn, violations, paint_size);
 		return 1;
 	}
 
 	double saved_kib = (double)((((size_t)51 << logn) + 31)
 	                          - (((size_t)43 << logn) + 31)) / 1024.0;
-	printf("PASS logn=%u: bytes [43n, 51n+31) untouched "
+	printf("PASS logn=%u: bytes [37n, 51n+31) untouched "
 		"(%zu bytes verified, %.1f KiB)\n",
 		logn, paint_size, saved_kib);
 	return 0;
@@ -124,12 +121,11 @@ test_at_logn(unsigned logn)
 
 int main(void)
 {
-	printf("=== FNDSA_FFSAMP_5N_REDUCED paint-and-check (Day 3) ===\n");
-	printf("Verifies the new outer-level Path A body at FNDSA_PHASE1_REDUCED's\n");
-	printf("43n+31 byte tmp_len boundary. Path A's currently-shipped peak is\n");
-	printf("5n FLR (same as PATH_B+PHASE1) because step 2 uses qc(16..19) as\n");
-	printf("t1*l10 scratch. A tighter 35n+31 boundary requires a new fused\n");
-	printf("fpoly_mac_fft primitive — Day 4+ work.\n\n");
+	printf("=== FNDSA_FFSAMP_5N_REDUCED paint-and-check (Day 3+4) ===\n");
+	printf("Verifies the new outer-level Path A body at the tightened\n");
+	printf("37n+31 byte tmp_len boundary. Path A uses fpoly_mac_fft (Day 4)\n");
+	printf("for in-place c1 = t0 + t1·l10, eliminating qc(16..19) scratch and\n");
+	printf("achieving 4n FLR ffsamp peak.\n\n");
 
 	int failures = 0;
 	for (unsigned logn = 9; logn <= 10; logn++) {
@@ -138,7 +134,7 @@ int main(void)
 
 	printf("\n");
 	if (failures == 0) {
-		printf("ALL TESTS PASSED — Path A respects 43n+31 boundary; new outer body\n");
+		printf("ALL TESTS PASSED — Path A respects 37n+31 boundary; new outer body\n");
 		printf("produces verifying signatures at logn 9, 10\n");
 		return 0;
 	}

@@ -108,13 +108,20 @@ test_at_logn(unsigned logn)
 		((((size_t)51 << logn) + 31) - tmp_len) / 1024,
 		bit_exact ? " — bit-exact match" : " — distribution-equivalent");
 
-	/* Test undersized tmp_len rejection. */
+	/* Test undersized tmp_len rejection. The actual API minimum depends
+	   on build flags: 37n+31 under FFSAMP_5N_REDUCED, 43n+31 otherwise.
+	   Send 1 byte below the actual minimum. */
+#ifdef FNDSA_FFSAMP_5N_REDUCED
+	size_t actual_min = ((size_t)37 << logn) + 31;
+#else
+	size_t actual_min = ((size_t)43 << logn) + 31;
+#endif
 	size_t lc = fndsa_sign_seeded_with_basis_temp(
 		sk, sk_len, basis,
 		NULL, 0, FNDSA_HASH_ID_RAW, "msg", 3,
 		mseed, sizeof mseed,
 		sig_with_basis, sig_len_max,
-		tmp_basis, tmp_len - 1);  /* 1 byte short */
+		tmp_basis, actual_min - 1);  /* 1 byte below actual min */
 	if (lc != 0) {
 		fprintf(stderr,
 			"logn=%u: undersized tmp_len NOT rejected (returned %zu)\n",

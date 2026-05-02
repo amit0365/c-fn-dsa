@@ -1832,6 +1832,122 @@ fpoly_mul_fft(unsigned logn, fpr *a, const fpr *b)
 #endif
 }
 
+#if FNDSA_FFSAMP_5N_REDUCED
+/* see sign_inner.h.
+ *
+ * Per-coefficient fused multiply-accumulate in FFT representation:
+ *     c[k] = c[k] + a[k] · b[k]    (complex)
+ *
+ * In place at c; reads a and b non-destructively. No scratch beyond
+ * registers — load a[k] and b[k] into registers, compute the product,
+ * load c[k], add product, store back. Designed specifically to compute
+ * c1 += t1·l10 within the 4n FLR boundary of Path A's outer body. */
+TARGET_SSE2 TARGET_NEON
+void
+fpoly_mac_fft(unsigned logn, fpr *c, const fpr *a, const fpr *b)
+{
+	size_t hn = (size_t)1 << (logn - 1);
+#if FNDSA_SSE2
+	if (hn >= 2) {
+		for (size_t i = 0; i < hn; i += 2) {
+			__m128d xar = _mm_loadu_pd((const double *)a + i);
+			__m128d xai = _mm_loadu_pd((const double *)a + i + hn);
+			__m128d xbr = _mm_loadu_pd((const double *)b + i);
+			__m128d xbi = _mm_loadu_pd((const double *)b + i + hn);
+			__m128d xcr = _mm_loadu_pd((const double *)c + i);
+			__m128d xci = _mm_loadu_pd((const double *)c + i + hn);
+
+			__m128d pr = _mm_sub_pd(
+				_mm_mul_pd(xar, xbr),
+				_mm_mul_pd(xai, xbi));
+			__m128d pi = _mm_add_pd(
+				_mm_mul_pd(xar, xbi),
+				_mm_mul_pd(xai, xbr));
+
+			_mm_storeu_pd((double *)c + i,
+				_mm_add_pd(xcr, pr));
+			_mm_storeu_pd((double *)c + i + hn,
+				_mm_add_pd(xci, pi));
+		}
+	} else if (hn >= 1) {
+		__m128d xa = _mm_loadu_pd((const double *)a);
+		__m128d xb = _mm_loadu_pd((const double *)b);
+		__m128d xc = _mm_loadu_pd((const double *)c);
+		__m128d xpr = _mm_mul_pd(xa, xb);
+		__m128d xpi = _mm_mul_pd(xa, _mm_shuffle_pd(xb, xb, 1));
+		xpr = _mm_sub_pd(xpr, _mm_shuffle_pd(xpr, xpr, 1));
+		xpi = _mm_add_pd(xpi, _mm_shuffle_pd(xpi, xpi, 1));
+		__m128d xp = _mm_shuffle_pd(xpr, xpi, 0);
+		_mm_storeu_pd((double *)c, _mm_add_pd(xc, xp));
+	}
+#elif FNDSA_NEON
+	if (hn >= 2) {
+		for (size_t i = 0; i < hn; i += 2) {
+			float64x2_t xar =
+				vld1q_f64((const float64_t *)a + i);
+			float64x2_t xai =
+				vld1q_f64((const float64_t *)a + i + hn);
+			float64x2_t xbr =
+				vld1q_f64((const float64_t *)b + i);
+			float64x2_t xbi =
+				vld1q_f64((const float64_t *)b + i + hn);
+			float64x2_t xcr =
+				vld1q_f64((const float64_t *)c + i);
+			float64x2_t xci =
+				vld1q_f64((const float64_t *)c + i + hn);
+
+			float64x2_t pr = vsubq_f64(
+				vmulq_f64(xar, xbr),
+				vmulq_f64(xai, xbi));
+			float64x2_t pi = vaddq_f64(
+				vmulq_f64(xar, xbi),
+				vmulq_f64(xai, xbr));
+
+			vst1q_f64((float64_t *)c + i,
+				vaddq_f64(xcr, pr));
+			vst1q_f64((float64_t *)c + i + hn,
+				vaddq_f64(xci, pi));
+		}
+	} else if (hn >= 1) {
+		static const union {
+			uint64_t u[2];
+			float64x2_t x;
+		} cz = { { 0, (uint64_t)1 << 63 } };
+		float64x2_t xa = vld1q_f64((const float64_t *)a);
+		float64x2_t xb = vld1q_f64((const float64_t *)b);
+		float64x2_t xc = vld1q_f64((const float64_t *)c);
+		float64x2_t xpr = vmulq_f64(xa, xb);
+		float64x2_t xpi = vmulq_f64(xa, vextq_f64(xb, xb, 1));
+		xpr = vreinterpretq_f64_u64(
+			veorq_u64(vreinterpretq_u64_f64(xpr), cz.x));
+		float64x2_t xp = vpaddq_f64(xpr, xpi);
+		vst1q_f64((float64_t *)c, vaddq_f64(xc, xp));
+	}
+#elif FNDSA_RV64D
+	f64 *cc = (f64 *)c;
+	const f64 *aa = (const f64 *)a;
+	const f64 *bb = (const f64 *)b;
+	for (size_t i = 0; i < hn; i ++) {
+		f64 a_re = aa[i];
+		f64 a_im = aa[i + hn];
+		f64 b_re = bb[i];
+		f64 b_im = bb[i + hn];
+		f64 pr = f64_sub(f64_mul(a_re, b_re), f64_mul(a_im, b_im));
+		f64 pi = f64_add(f64_mul(a_im, b_re), f64_mul(a_re, b_im));
+		cc[i] = f64_add(cc[i], pr);
+		cc[i + hn] = f64_add(cc[i + hn], pi);
+	}
+#else
+	for (size_t i = 0; i < hn; i ++) {
+		fpr pr, pi;
+		FPC_MUL(pr, pi, a[i], a[i + hn], b[i], b[i + hn]);
+		c[i] = fpr_add(c[i], pr);
+		c[i + hn] = fpr_add(c[i + hn], pi);
+	}
+#endif
+}
+#endif /* FNDSA_FFSAMP_5N_REDUCED */
+
 /* unused
 TARGET_SSE2 TARGET_NEON
 void

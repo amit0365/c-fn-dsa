@@ -44,7 +44,11 @@ sign_step1(unsigned logn, const uint8_t *sign_key,
 	size_t G_offset_n;
 #if FNDSA_PHASE1_REDUCED
 	if (external_basis != NULL) {
+#if FNDSA_FFSAMP_5N_REDUCED
+		G_offset_n = 36;  /* Path A: G after hm (at 34n) + 2n */
+#else
 		G_offset_n = 42;
+#endif
 	} else
 #endif
 #if FNDSA_PATH_B
@@ -507,9 +511,21 @@ sign_with_basis_wrapper(
 	if (max_sig_len < FNDSA_SIGNATURE_SIZE(logn)) {
 		return 0;
 	}
+#if FNDSA_FFSAMP_5N_REDUCED
+	/* Path A min: 4n FLR (ffsamp peak) + post-ffsamp scratch + hm + G + 31.
+	   FP-stays post-ffsamp scratch ends at 34n bytes (w0+w1+f+g), then
+	   hm (2n) + G (n) + 31. Total = 37n+31. Scalar/integer builds end
+	   post-ffsamp at byte 26n so they could use 35n+31, but a single
+	   API minimum simplifies things — the 2n bytes/n unused on scalar
+	   builds is negligible (~1 KiB at logn=9). */
+	if (tmp == NULL || tmp_len < (((size_t)37 << logn) + 31)) {
+		return 0;
+	}
+#else
 	if (tmp == NULL || tmp_len < (((size_t)43 << logn) + 31)) {
 		return 0;
 	}
+#endif
 
 	return sign_step1(logn,
 		sign_key, ctx, ctx_len, id, hv, hv_len,
