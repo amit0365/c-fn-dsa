@@ -684,7 +684,11 @@ test_sign_core(void)
 		fgF, KAT_512_G,
 		// KAT_512_f, KAT_512_g, KAT_512_F, KAT_512_G,
 		hashed_vk, NULL, 0, "\xFF", (const uint8_t *)"data1", 5,
-		KAT_512_RND, sizeof KAT_512_RND, sig, tmp);
+		KAT_512_RND, sizeof KAT_512_RND, sig, tmp
+#if FNDSA_PHASE1_REDUCED
+		, NULL  /* compute basis internally */
+#endif
+		);
 	if (j != FNDSA_SIGNATURE_SIZE(9)) {
 		fprintf(stderr, "wrong output size: %zu\n", j);
 		exit(EXIT_FAILURE);

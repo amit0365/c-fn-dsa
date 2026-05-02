@@ -119,7 +119,11 @@ sign_step1(unsigned logn, const uint8_t *sign_key,
 	   hashed_key[]. We can proceed to the main signing loop. */
 	return sign_core(logn, sign_key + 1, G, hashed_key,
 		ctx, ctx_len, id, hv, hv_len,
-		seed, seed_len, sig, tmp);
+		seed, seed_len, sig, tmp
+#if FNDSA_PHASE1_REDUCED
+		, NULL  /* compute basis internally */
+#endif
+		);
 
 	/* TODO: maybe explicitly overwrite the whole temporary area with
 	   zeros? Arguably this is mostly wasted time if the area is

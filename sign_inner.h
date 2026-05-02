@@ -729,7 +729,11 @@ size_t sign_core(unsigned logn,
 	const uint8_t *sign_key_fgF, const int8_t *G,
 	const uint8_t *hashed_vk, const uint8_t *ctx, size_t ctx_len,
 	const char *id, const uint8_t *hv, size_t hv_len,
-	const uint8_t *seed, size_t seed_len, uint8_t *sig, void *tmp);
+	const uint8_t *seed, size_t seed_len, uint8_t *sig, void *tmp
+#if FNDSA_PHASE1_REDUCED
+	, const fpr *external_basis
+#endif
+	);
 
 /* ==================================================================== */
 

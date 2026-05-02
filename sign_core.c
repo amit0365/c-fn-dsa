@@ -29,14 +29,23 @@ basis_to_FFT(unsigned logn,
 	fpoly_neg(logn, b11);
 }
 
-/* see sign_inner.h */
+/* see sign_inner.h.
+   FNDSA_PHASE1_REDUCED: when external_basis is non-NULL, sign_core uses
+   it as the precomputed basis (skips basis_to_FFT, gram_fft, and the
+   compact rearrange — instead calls fpoly_apply_basis_external and
+   fpoly_gram_fft_dst directly). external_basis must point to 4n FLR
+   of FFT-domain basis polynomials (b00, b01, b10, b11 contiguous). */
 TARGET_SSE2 TARGET_NEON
 size_t
 sign_core(unsigned logn,
 	const uint8_t *sign_key_fgF, const int8_t *G,
 	const uint8_t *hashed_vk, const uint8_t *ctx, size_t ctx_len,
 	const char *id, const uint8_t *hv, size_t hv_len,
-	const uint8_t *seed, size_t seed_len, uint8_t *sig, void *tmp)
+	const uint8_t *seed, size_t seed_len, uint8_t *sig, void *tmp
+#if FNDSA_PHASE1_REDUCED
+	, const fpr *external_basis
+#endif
+	)
 {
 	/* Output value is 0 on error, or the signature length on success. */
 	size_t ret = 0;
@@ -175,6 +184,27 @@ sign_core(unsigned logn,
 		(void)trim_i8_decode(logn, sign_key_fgF + flen, g, nbits);
 		fpr *t0 = (fpr *)tmp;
 		fpr *t1 = t0 + n;
+#if FNDSA_PHASE1_REDUCED
+		/* Phase 1 reduction: when external_basis is provided, skip
+		   basis_to_FFT + gram_fft + compact rearrange. Read basis
+		   from caller's buffer (typically flash); write target vector
+		   and gram outputs directly to the compact tmp[] layout:
+		     qc(0..3)   t0  (target, n FLR)
+		     qc(4..7)   t1  (target, n FLR)
+		     qc(8..11)  g01 (n FLR)
+		     qc(12..13) g00 (n/2 FLR self-adjoint)
+		     qc(14..15) g11 (n/2 FLR self-adjoint)
+		   Phase 1 footprint: 4n FLR (down from 6n with FNDSA_PATH_B). */
+		if (external_basis != NULL) {
+			fpr *g01 = t1 + n;          /* qc(8..11) */
+			fpr *g00 = g01 + n;         /* qc(12..13) */
+			fpr *g11 = g00 + hn;        /* qc(14..15) */
+			fpoly_apply_basis_external(logn, t0, t1,
+				external_basis, hm);
+			fpoly_gram_fft_dst(logn, g00, g01, g11, external_basis);
+			goto phase1_done;
+		}
+#endif
 		basis_to_FFT(logn, f, g, F, G, t1 + n);
 		fpr *b00 = t1 + n;
 		fpr *b01 = b00 + n;
@@ -228,6 +258,9 @@ sign_core(unsigned logn,
 		fpoly_apply_basis(logn, t0, t1, t2, b11, hm);
 #endif
 
+#if FNDSA_PHASE1_REDUCED
+phase1_done:;
+#endif
 		/* Current layout:
 		      t0  (n)
 		      t1  (n)
