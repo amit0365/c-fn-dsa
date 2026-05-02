@@ -308,3 +308,66 @@ If items 1–4 land at the high end of estimates simultaneously, even Path
 A can leave the budget tight by ~500 bytes. Donjon-side measurement is
 the only way to settle this — but that's a deployment readiness check,
 not an implementation gate.
+
+## Security stance compliance
+
+Pornin's c-fn-dsa stance (Falcon on Cortex-M4 paper, §1, Security Stance)
+commits to **constant-time signing only**:
+
+| Rule | Description |
+|---|---|
+| 1 | No memory access at secret-dependent addresses |
+| 2 | No conditional jumps on secret conditions |
+| 3 | No `it` opcode (potentially non-CT on larger CPUs) |
+| 4 | No `udiv`/`sdiv` opcodes on secret data (use software-emulated `fpr_div`) |
+
+Explicit exclusions: power analysis, fault attacks, EM, glitch — these
+are SE-side countermeasures (masking, lockstep) and out of scope for
+c-fn-dsa itself.
+
+### Compliance check across all four shipped optimizations + Path A
+
+| Optimization | Rule 1 | Rule 2 | Rule 3 | Rule 4 |
+|---|---|---|---|---|
+| PATH_B body (t1·l10 absorption) | ✅ public-derived indices | ✅ no new secret branches | ✅ no asm | ✅ uses existing `fpr_div` |
+| Phase 1 reorder (apply_basis ↔ gram) | ✅ same primitives | ✅ | ✅ | ✅ |
+| Phase 1 reduction (precomputed basis) | ✅ sequential reads at fixed offsets | ✅ | ✅ | ✅ |
+| Recursive PB tightening (Day 9.5) | ✅ buffer-size only | ✅ | ✅ | ✅ |
+| Path A (planned) | ✅ same access patterns | ✅ | ✅ | ✅ adds `fpoly_div_selfadj` (CT software) |
+
+**Bottom line: stance preserved across all changes.** The upstream PR can
+ship under Pornin's existing stance verbatim. No new timing channels.
+
+### New attack surfaces (out-of-scope for c-fn-dsa, in-scope for SE deployment)
+
+These are **not** stance breakages — they're new threat surfaces specific
+to the SE deployment shape. The `c-fn-dsa` patch doesn't need to address
+them; the deployment runbook does.
+
+1. **Flash-resident basis exposes the basis-load step to SPA.** With
+   phase 1 reduction, ~32 KiB of basis bits transit the flash bus on
+   every sign. Donjon's masking layer must apply to flash reads of
+   secret data, not only to RAM-resident state. → Donjon question 25.
+
+2. **Basis bit-flip silently corrupts subsequent signatures.** Baseline
+   recomputes basis from `(f, g, F)` every sign, so flash corruption is
+   limited to those keys. With precomputed basis stored, a bit-flip
+   produces wrong (potentially invalid) signatures with no on-the-fly
+   detection. Mitigation: HMAC-on-write + verify-on-read, OR rely on
+   flash ECC. → Donjon question 26.
+
+3. **Path A adds n fpr_div ops on basis polynomials per sign.**
+   Marginal SPA exposure increase vs existing LDL (which already does
+   thousands of fpr_div on secrets across recursion levels). Confirm
+   masking covers fpr_div uniformly at the recompute call site. →
+   Donjon question 27.
+
+4. **PATH_B logn=2 correctness gap.** FP-order divergence at n=4
+   occasionally crosses an integer-rounding boundary in the Gaussian
+   sampler, producing different but verifiable signatures. FN-DSA does
+   not standardize n=4, so no spec gap; the test suite skips logn=2
+   under PATH_B. Confirm Donjon's KAT testing accepts the skip. →
+   Donjon question 29.
+
+The four questions above are added to `ledger_donjon_questions.md` (items
+25–30). They do not gate implementation — only deployment validation.
