@@ -1325,15 +1325,13 @@ ffsamp_fft_inner(sampler_state *ss, unsigned logn, fpr *tmp)
 		ffsamp_fft_inner(ss, logn - 1, qc(6));
 
 		/* Step 9: recompute g01 from external_basis into qc(10..13).
-		   This overwrites the dirty callee scratch from step 8.
-		   g01 is computed in-place via a per-coefficient primitive. */
+		   Per-coefficient primitive — no scratch beyond dst. */
 		fpoly_g01_fft_external(logn, qc(10), ss->external_basis);
 
 		/* Step 10: derive l10 = g01 / d00 via fpoly_LDL_fft.
-		   - g00 input = d00 at qc(4..5) (read-only during LDL)
+		   - g00 input = d00 at qc(4..5) (read-only)
 		   - g01 in/out = qc(10..13) (becomes l10 in place)
-		   - g11 in/out = qc(14..15) (dirty, becomes discarded d11)
-		   The d11 output at qc(14..15) is unused. */
+		   - g11 in/out = qc(14..15) (dirty, becomes discarded d11) */
 		fpoly_LDL_fft(logn, qc(4), qc(10), qc(14));
 
 		/* Step 11: tb0 = c1 - z1·l10; z1 → qc(10..13). The
@@ -1343,84 +1341,59 @@ ffsamp_fft_inner(sampler_state *ss, unsigned logn, fpr *tmp)
 		   qc(10..13). */
 		fpoly_pathb_finalize(logn, qc(0), qc(10), qc(6), qc(8));
 
-		/* Step 12: split d00 → left subtree gram positions. d00 at
-		   qc(4..5) is consumed; outputs go to qc(?). But the left
-		   subtree expects gram at the SAME callee positions as the
-		   right subtree — i.e., qc(10..11), qc(12), qc(13). qc(10..13)
-		   currently has z1 from step 11. We need to move z1 OUT first.
+		/* Step 12: split tb0 (qc(0..3)) → callee positions for left
+		   subtree. Source qc(0..3) = tb0, dest qc(6..7) (ce_t0_left)
+		   and qc(8..9) (ce_t1_left). Disjoint from source. Consumes
+		   qc(0..3); qc(6..7) and qc(8..9) overwritten (formerly
+		   z1_low and z1_high split form, now stale since z1 is full
+		   at qc(10..13)). */
+		fpoly_split_fft(logn, qc(6), qc(8), qc(0));
 
-		   Strategy: split d00 with non-default destinations (left_01
-		   to qc(14..15)? No, ½n needed; qc(14..15) is ½n, fits). But
-		   then the LEFT callee at qc(6) wouldn't find left_01 at its
-		   expected position qc(10..11). So we must use the standard
-		   layout — which means moving z1 first.
+		/* Step 13: move z1 from qc(10..13) → qc(0..3). qc(0..3) is
+		   free (consumed by step 12's split-tb0). qc(0..3) and
+		   qc(10..13) are disjoint, so memcpy is safe.
+		   Why qc(0..3) instead of qc(4..7)? qc(4..5) holds d00 (still
+		   alive — needed for split-d00 in step 14). qc(0..3) is free.
+		   z1 at qc(0..3) survives the left recursion (callee_tmp =
+		   qc(6); callee writes qc(6..15); qc(0..5) preserved). At
+		   function exit we move z1 from qc(0..3) → qc(4..7) (step 17). */
+		memcpy(qc(0), qc(10), sizeof(fpr) << logn);
 
-		   Simplest order:
-		     a. split d00 → temp positions qc(14) (left_00 ¼n) +
-		        qc(?) (left_01 ½n). Doesn't work, qc(14..15) is ½n
-		        only.
-		     b. Move z1 to qc(4..7) FIRST (qc(4..5) is consumed
-		        post-step-12 split, so we can overwrite it AFTER the
-		        split, but we want z1 there for the FINAL function
-		        contract). For now, save z1 to a temp, do the split,
-		        then move z1 to qc(4..7).
-
-		   Actually, the cleanest: defer split-d00 until AFTER we've
-		   moved z1 to qc(4..7). But qc(4..5) is d00 — moving z1 there
-		   destroys d00.
-
-		   Resolution: split d00 with output at the standard left
-		   subtree positions qc(10..11), qc(12), qc(13) — but z1 is
-		   THERE. So: move z1 first, then split. But moving z1 to
-		   qc(4..7) destroys d00.
-
-		   The chicken-and-egg requires a temp. We have qc(14..19) as
-		   scratch (qc(14..15) free, qc(16..19) free post-recursion).
-
-		   Plan: save z1 to qc(16..19). Split d00 → standard positions
-		   (qc(10..13) overwritten — z1 already saved). Move z1 from
-		   qc(16..19) to qc(4..7) (qc(4..5) now consumed by split).
-		   Split tb0 → qc(6..9) (z1 at qc(4..7) preserved; tb0 at
-		   qc(0..3) consumed). Left recursion at qc(6). Merge z0 →
-		   qc(0..3). */
-
-		/* Step 12a: save z1 from qc(10..13) → qc(16..19) */
-		memcpy(qc(16), qc(10), sizeof(fpr) << logn);
-
-		/* Step 12b: split d00 → left subtree gram at standard
-		   positions. Source qc(4..5), destinations qc(12) (left_00,
-		   ¼n) + qc(10..11) (left_01, ½n). After split: qc(4..5)
-		   consumed, qc(10..11) = left_01, qc(12) = left_00. */
+		/* Step 14: split d00 (qc(4..5)) → left subtree gram at
+		   standard callee positions. Output: qc(12) = left_00 (¼n),
+		   qc(10..11) = left_01 (½n). Source and dest disjoint. */
 		fpoly_split_selfadj_fft(logn, qc(12), qc(10), qc(4));
 		memcpy(qc(13), qc(12), sizeof(fpr) << (logn - 2));
 
-		/* Step 12c: move z1 from qc(16..19) → qc(4..7). qc(4..5) is
-		   free (consumed by step 12b). */
-		memcpy(qc(4), qc(16), sizeof(fpr) << logn);
-
-		/* Step 13: split tb0 (qc(0..3)) → callee positions. Source
-		   qc(0..3), dest qc(6..7) (ce_t0) + qc(8..9) (ce_t1). Disjoint. */
-		fpoly_split_fft(logn, qc(6), qc(8), qc(0));
-
-		/* Step 14: left recursion. Callee tmp = qc(6); writes through
-		   qc(15). qc(0..5) preserved (qc(4..7) holds z1; left callee
-		   only writes qc(6..) so qc(4..5) is preserved, but qc(6..7)
-		   is the callee's t0 input which the callee mutates).
-
-		   Wait: callee t0 input is at qc(6..7), callee t1 input at
-		   qc(8..9). Callee returns z0 in callee qc'(0..3) = parent
-		   qc(6..7) and z1 in callee qc'(4..7) = parent qc(8..9).
-		   So after step 14: qc(6..7) = z0_low, qc(8..9) = z0_high.
-		   qc(4..5) = unchanged (z1's first half — still there). */
+		/* Step 15: left recursion at callee tmp = qc(6). Callee
+		   writes qc(6..15). qc(0..5) preserved (qc(0..3) holds z1
+		   temporarily; qc(4..5) is free post step 14).
+		   qc(16..27) preserved.
+		   After: qc(6..7) = z0_low (callee qc'(0..3)),
+		          qc(8..9) = z0_high (callee qc'(4..7)). */
 		ffsamp_fft_inner(ss, logn - 1, qc(6));
 
-		/* Step 15: merge z0 from qc(6..9) into qc(0..3). */
-		fpoly_merge_fft(logn, qc(0), qc(6), qc(8));
+		/* Step 16: merge z0 from qc(6..9) into scratch qc(10..13).
+		   Cannot merge directly to qc(0..3) (it still holds z1) and
+		   cannot merge directly to qc(4..7) (its destination overlaps
+		   qc(6..7) which is the merge source). qc(10..13) is dirty
+		   left-recursion scratch — safe to reuse. */
+		fpoly_merge_fft(logn, qc(10), qc(6), qc(8));
+
+		/* Step 17: copy z1 from qc(0..3) → qc(4..7). Overwrites
+		   qc(6..7) (which had z0_low — already consumed by step 16's
+		   merge). qc(0..3) and qc(4..7) are byte-disjoint
+		   (offsets [0,n) and [n,2n)), so memcpy is safe. */
+		memcpy(qc(4), qc(0), sizeof(fpr) << logn);
+
+		/* Step 18: copy z0 from scratch qc(10..13) → qc(0..3). */
+		memcpy(qc(0), qc(10), sizeof(fpr) << logn);
 
 		/* Final state:
-		      qc(0..3) = z0 (full)
-		      qc(4..7) = z1 (full, preserved through left recursion)
-		   Function contract satisfied. */
+		      qc(0..3) = z0 (from step 18)
+		      qc(4..7) = z1 (from step 17)
+		   Function contract satisfied. Peak FLR usage = qc(0..15) =
+		   4n FLR (the Path A target). */
 		(void)hn;
 		goto ffsamp_done;
 	}
