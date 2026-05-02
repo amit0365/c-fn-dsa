@@ -249,6 +249,41 @@
 #error FNDSA_PHASE1_REDUCED requires FNDSA_PATH_B
 #endif
 
+/* If FNDSA_FFSAMP_5N_REDUCED is 1, the outer-level call of
+   ffsamp_fft_inner drops l10 from its persistent set across the right
+   recursion and recomputes it from external_basis post-recursion. This
+   shrinks the OUTER-level ffsamp peak from 5n FLR to 4n FLR, taking the
+   total signing tmp[] from 43n+31 to 35n+31 bytes — saves another 4 KiB
+   at FN-DSA-512 / 8 KiB at FN-DSA-1024 on top of FNDSA_PHASE1_REDUCED.
+
+   Inner recursion levels are unaffected (they have no external basis to
+   recompute from); they retain the standard 5n_{L−1} peak which is below
+   the outer 4n_L absolute peak.
+
+   The outer-level layout becomes:
+     qc(0..3)   c1                  (n FLR, persistent across right rec)
+     qc(4..5)   d00                 (½n FLR, persistent across right rec)
+     qc(6..)    callee tmp           — callee tmp moves down from qc(10) to qc(6)
+   Persistent_above shrinks from 2.5n (c1+l10+d00) to 1.5n (c1+d00).
+
+   Post-right-recursion, l10 is recomputed via:
+     g01 = b00·adj(b10) + b01·adj(b11)   (2 fpoly_mul + 1 fpoly_add)
+     l10 = g01 / d00                      (1 fpoly_div_selfadj)
+   ~11n real FP ops per signing. Bench-measured 0.18% on NEON host;
+   projected ~2% on M4-class scalar. Well under the 2% acceptability
+   threshold for SE deployment.
+
+   Implies FNDSA_PHASE1_REDUCED (uses external_basis at outer level).
+
+   To enable: -DFNDSA_PATH_B=1 -DFNDSA_PHASE1_REDUCED=1
+              -DFNDSA_FFSAMP_5N_REDUCED=1 at compile time. */
+#ifndef FNDSA_FFSAMP_5N_REDUCED
+#define FNDSA_FFSAMP_5N_REDUCED   0
+#endif
+#if FNDSA_FFSAMP_5N_REDUCED && !FNDSA_PHASE1_REDUCED
+#error FNDSA_FFSAMP_5N_REDUCED requires FNDSA_PHASE1_REDUCED
+#endif
+
 /* Automatically recognize some architectures as being "64-bit", which
    mostly means that we assume that 64-bit shifts are constant-time
    with regard to the shift count. */

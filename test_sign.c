@@ -22,6 +22,9 @@ typedef struct {
 typedef struct {
 	chacha20rng_context pc;
 	unsigned logn;
+#if FNDSA_FFSAMP_5N_REDUCED
+	const fpr *external_basis;
+#endif
 } chacha20_sampler_state;
 
 #define sampler_state   chacha20_sampler_state

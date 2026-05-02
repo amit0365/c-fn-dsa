@@ -18,6 +18,9 @@ typedef struct {
 typedef struct {
 	test_rng_context pc;
 	unsigned logn;
+#if FNDSA_FFSAMP_5N_REDUCED
+	const fpr *external_basis;
+#endif
 } test_sampler_state;
 
 #define sampler_state   test_sampler_state

@@ -1248,6 +1248,184 @@ ffsamp_fft_inner(sampler_state *ss, unsigned logn, fpr *tmp)
 	   the callee receives half the space for half the degree. */
 #define qc(off)   (tmp + ((off) << (logn - 2)))
 
+#if FNDSA_FFSAMP_5N_REDUCED
+	/* ============================================================
+	 * ffsamp 5n→4n outer-level body (Path A). See inner.h's
+	 * FNDSA_FFSAMP_5N_REDUCED comment for the design rationale.
+	 *
+	 * Activated only at the OUTER level of the recursion (logn ==
+	 * ss->logn) and only when an external basis is available. Inner
+	 * recursive calls fall through to the standard PATH_B body below.
+	 *
+	 * Outer-level layout (16-quarter Path A):
+	 *   qc(0..3)    c1               (n, persistent across right rec)
+	 *   qc(4..5)    d00              (½n, persistent across right rec)
+	 *   qc(6..7)    callee t0        (½n; split-low of t1)
+	 *   qc(8..9)    callee t1        (½n; split-high of t1)
+	 *   qc(10..11)  right_01         (½n; callee g01)
+	 *   qc(12)      right_00         (¼n; callee g00 self-adj)
+	 *   qc(13)      right_11         (¼n; callee g11 self-adj = right_00)
+	 *   qc(14..15)  free / scratch
+	 *
+	 * Persistent_above shrinks from 2.5n (PATH_B's c1+l10+d00) to 1.5n
+	 * (just c1+d00). Callee tmp moves down from qc(10) to qc(6),
+	 * giving outer-level peak = 1.5n + 2.5n callee = 4n FLR. */
+	if (logn == ss->logn && ss->external_basis != NULL) {
+		size_t hn = (size_t)1 << (logn - 1);
+
+		/* Step 1: LDL decomposition of (g00, g01, g11) at qc(8..15).
+		   Same as PATH_B; produces l10 at qc(8..11), d11 at qc(14..15).
+		   d00 unchanged at qc(12..13). */
+		fpoly_LDL_fft(logn, qc(12), qc(8), qc(14));
+
+		/* Step 2: t1 * l10 → scratch qc(16..19). t1 is read from
+		   qc(4..7) non-destructively. */
+		memcpy(qc(16), qc(4), sizeof(fpr) << logn);
+		fpoly_mul_fft(logn, qc(16), qc(8));
+
+		/* Step 3: c1 = t0 + (t1*l10), in place at qc(0..3). */
+		fpoly_add(logn, qc(0), qc(16));
+
+		/* Step 4: save t1 to scratch at qc(16..19) before we overwrite
+		   qc(4..5) with d00. (qc(16..19) is dirty from step 2 but the
+		   t1*l10 product is no longer needed after step 3 consumed it.) */
+		memcpy(qc(16), qc(4), sizeof(fpr) << logn);
+
+		/* Step 5: relocate d00 from qc(12..13) → qc(4..5). l10 at
+		   qc(8..11) is dropped (will be recomputed post-recursion). */
+		memcpy(qc(4), qc(12), sizeof(fpr) << (logn - 1));
+
+		/* Step 6: split t1 → callee positions qc(6..9). Reading from
+		   the qc(16..19) scratch (saved in step 4); writing to
+		   qc(6..7) (ce_t0) and qc(8..9) (ce_t1). Source and destination
+		   are disjoint (qc(16..19) vs qc(6..9)). */
+		fpoly_split_fft(logn, qc(6), qc(8), qc(16));
+
+		/* Step 7: split d11 → callee gram positions. d11 is at
+		   qc(14..15); split into right_01 (½n at qc(10..11)) +
+		   right_00 (¼n at qc(12)) + right_11 (¼n at qc(13), copy of
+		   right_00). f1 dst (qc(10..11)) and f src (qc(14..15)) are
+		   disjoint, so no save scratch is needed (unlike PATH_B's
+		   step 7 where f1 dst and f src would overlap). */
+		fpoly_split_selfadj_fft(logn, qc(12), qc(10), qc(14));
+		memcpy(qc(13), qc(12), sizeof(fpr) << (logn - 2));
+
+		/* Pre-recursion layout (16-quarter Path A):
+		      0..3   c1, 4..5  d00,
+		      6..7   ce_t0, 8..9   ce_t1,
+		      10..11 right_01, 12 right_00, 13 right_11,
+		      14..15 free scratch */
+
+		/* Step 8: right recursion at callee tmp = qc(6). Inner call
+		   sees logn-1 != ss->logn (or external_basis NULL via the
+		   non-outer path), so it takes the standard PATH_B body and
+		   uses 5n_{L-1} = 2.5n parent-FLR through qc(15). qc(0..5) is
+		   below callee tmp, preserved. qc(16..27) is above callee
+		   writes, also preserved. */
+		ffsamp_fft_inner(ss, logn - 1, qc(6));
+
+		/* Step 9: recompute g01 from external_basis into qc(10..13).
+		   This overwrites the dirty callee scratch from step 8.
+		   g01 is computed in-place via a per-coefficient primitive. */
+		fpoly_g01_fft_external(logn, qc(10), ss->external_basis);
+
+		/* Step 10: derive l10 = g01 / d00 via fpoly_LDL_fft.
+		   - g00 input = d00 at qc(4..5) (read-only during LDL)
+		   - g01 in/out = qc(10..13) (becomes l10 in place)
+		   - g11 in/out = qc(14..15) (dirty, becomes discarded d11)
+		   The d11 output at qc(14..15) is unused. */
+		fpoly_LDL_fft(logn, qc(4), qc(10), qc(14));
+
+		/* Step 11: tb0 = c1 - z1·l10; z1 → qc(10..13). The
+		   pathb_finalize fused primitive reads l10 from qc(10..13),
+		   the right recursion's z output split form from qc(6..9),
+		   c1 from qc(0..3); writes tb0 to qc(0..3) and full z1 to
+		   qc(10..13). */
+		fpoly_pathb_finalize(logn, qc(0), qc(10), qc(6), qc(8));
+
+		/* Step 12: split d00 → left subtree gram positions. d00 at
+		   qc(4..5) is consumed; outputs go to qc(?). But the left
+		   subtree expects gram at the SAME callee positions as the
+		   right subtree — i.e., qc(10..11), qc(12), qc(13). qc(10..13)
+		   currently has z1 from step 11. We need to move z1 OUT first.
+
+		   Strategy: split d00 with non-default destinations (left_01
+		   to qc(14..15)? No, ½n needed; qc(14..15) is ½n, fits). But
+		   then the LEFT callee at qc(6) wouldn't find left_01 at its
+		   expected position qc(10..11). So we must use the standard
+		   layout — which means moving z1 first.
+
+		   Simplest order:
+		     a. split d00 → temp positions qc(14) (left_00 ¼n) +
+		        qc(?) (left_01 ½n). Doesn't work, qc(14..15) is ½n
+		        only.
+		     b. Move z1 to qc(4..7) FIRST (qc(4..5) is consumed
+		        post-step-12 split, so we can overwrite it AFTER the
+		        split, but we want z1 there for the FINAL function
+		        contract). For now, save z1 to a temp, do the split,
+		        then move z1 to qc(4..7).
+
+		   Actually, the cleanest: defer split-d00 until AFTER we've
+		   moved z1 to qc(4..7). But qc(4..5) is d00 — moving z1 there
+		   destroys d00.
+
+		   Resolution: split d00 with output at the standard left
+		   subtree positions qc(10..11), qc(12), qc(13) — but z1 is
+		   THERE. So: move z1 first, then split. But moving z1 to
+		   qc(4..7) destroys d00.
+
+		   The chicken-and-egg requires a temp. We have qc(14..19) as
+		   scratch (qc(14..15) free, qc(16..19) free post-recursion).
+
+		   Plan: save z1 to qc(16..19). Split d00 → standard positions
+		   (qc(10..13) overwritten — z1 already saved). Move z1 from
+		   qc(16..19) to qc(4..7) (qc(4..5) now consumed by split).
+		   Split tb0 → qc(6..9) (z1 at qc(4..7) preserved; tb0 at
+		   qc(0..3) consumed). Left recursion at qc(6). Merge z0 →
+		   qc(0..3). */
+
+		/* Step 12a: save z1 from qc(10..13) → qc(16..19) */
+		memcpy(qc(16), qc(10), sizeof(fpr) << logn);
+
+		/* Step 12b: split d00 → left subtree gram at standard
+		   positions. Source qc(4..5), destinations qc(12) (left_00,
+		   ¼n) + qc(10..11) (left_01, ½n). After split: qc(4..5)
+		   consumed, qc(10..11) = left_01, qc(12) = left_00. */
+		fpoly_split_selfadj_fft(logn, qc(12), qc(10), qc(4));
+		memcpy(qc(13), qc(12), sizeof(fpr) << (logn - 2));
+
+		/* Step 12c: move z1 from qc(16..19) → qc(4..7). qc(4..5) is
+		   free (consumed by step 12b). */
+		memcpy(qc(4), qc(16), sizeof(fpr) << logn);
+
+		/* Step 13: split tb0 (qc(0..3)) → callee positions. Source
+		   qc(0..3), dest qc(6..7) (ce_t0) + qc(8..9) (ce_t1). Disjoint. */
+		fpoly_split_fft(logn, qc(6), qc(8), qc(0));
+
+		/* Step 14: left recursion. Callee tmp = qc(6); writes through
+		   qc(15). qc(0..5) preserved (qc(4..7) holds z1; left callee
+		   only writes qc(6..) so qc(4..5) is preserved, but qc(6..7)
+		   is the callee's t0 input which the callee mutates).
+
+		   Wait: callee t0 input is at qc(6..7), callee t1 input at
+		   qc(8..9). Callee returns z0 in callee qc'(0..3) = parent
+		   qc(6..7) and z1 in callee qc'(4..7) = parent qc(8..9).
+		   So after step 14: qc(6..7) = z0_low, qc(8..9) = z0_high.
+		   qc(4..5) = unchanged (z1's first half — still there). */
+		ffsamp_fft_inner(ss, logn - 1, qc(6));
+
+		/* Step 15: merge z0 from qc(6..9) into qc(0..3). */
+		fpoly_merge_fft(logn, qc(0), qc(6), qc(8));
+
+		/* Final state:
+		      qc(0..3) = z0 (full)
+		      qc(4..7) = z1 (full, preserved through left recursion)
+		   Function contract satisfied. */
+		(void)hn;
+		goto ffsamp_done;
+	}
+#endif
+
 #if FNDSA_PATH_B
 	/* ============================================================
 	 * Path B body. See inner.h's FNDSA_PATH_B comment for the design.
@@ -1416,6 +1594,10 @@ ffsamp_fft_inner(sampler_state *ss, unsigned logn, fpr *tmp)
 
 #endif /* FNDSA_PATH_B */
 
+#if FNDSA_FFSAMP_5N_REDUCED
+ffsamp_done:
+	;  /* exit point for the outer-level Path A body */
+#endif
 #undef qc
 }
 #endif

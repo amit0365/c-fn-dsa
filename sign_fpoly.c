@@ -3087,3 +3087,116 @@ fpoly_apply_basis_external(unsigned logn, fpr *t0, fpr *t1,
 	fpoly_apply_basis(logn, t0, t1, b01, b11, hm);
 }
 #endif /* FNDSA_PHASE1_REDUCED */
+
+#if FNDSA_FFSAMP_5N_REDUCED
+/* see sign_inner.h.
+ *
+ * Computes g01 = b00·adj(b10) + b01·adj(b11) where bXX are read from the
+ * 4n-FLR external basis at offsets 0, n, 2n, 3n respectively.
+ *
+ * Per-coefficient formula (each k in [0, hn)):
+ *   u = b00 · adj(b10):
+ *     u_re = b00_re · b10_re + b00_im · b10_im
+ *     u_im = b00_im · b10_re - b00_re · b10_im
+ *   v = b01 · adj(b11):
+ *     v_re = b01_re · b11_re + b01_im · b11_im
+ *     v_im = b01_im · b11_re - b01_re · b11_im
+ *   dst[k]      = u_re + v_re
+ *   dst[k + hn] = u_im + v_im
+ *
+ * Output is a full FFT-domain complex polynomial (n FLR). No scratch
+ * beyond dst. */
+TARGET_SSE2 TARGET_NEON
+void
+fpoly_g01_fft_external(unsigned logn, fpr *dst, const fpr *basis)
+{
+	size_t hn = (size_t)1 << (logn - 1);
+	size_t n = hn << 1;
+	const fpr *b00 = basis;
+	const fpr *b01 = basis + n;
+	const fpr *b10 = basis + 2 * n;
+	const fpr *b11 = basis + 3 * n;
+
+#if FNDSA_SSE2
+	const double *p00 = (const double *)b00;
+	const double *p01 = (const double *)b01;
+	const double *p10 = (const double *)b10;
+	const double *p11 = (const double *)b11;
+	double *pdst = (double *)dst;
+	for (size_t i = 0; i < hn; i += 2) {
+		__m128d b00_re = _mm_loadu_pd(p00 + i);
+		__m128d b00_im = _mm_loadu_pd(p00 + i + hn);
+		__m128d b01_re = _mm_loadu_pd(p01 + i);
+		__m128d b01_im = _mm_loadu_pd(p01 + i + hn);
+		__m128d b10_re = _mm_loadu_pd(p10 + i);
+		__m128d b10_im = _mm_loadu_pd(p10 + i + hn);
+		__m128d b11_re = _mm_loadu_pd(p11 + i);
+		__m128d b11_im = _mm_loadu_pd(p11 + i + hn);
+
+		__m128d u_re = _mm_add_pd(
+			_mm_mul_pd(b00_re, b10_re),
+			_mm_mul_pd(b00_im, b10_im));
+		__m128d u_im = _mm_sub_pd(
+			_mm_mul_pd(b00_im, b10_re),
+			_mm_mul_pd(b00_re, b10_im));
+		__m128d v_re = _mm_add_pd(
+			_mm_mul_pd(b01_re, b11_re),
+			_mm_mul_pd(b01_im, b11_im));
+		__m128d v_im = _mm_sub_pd(
+			_mm_mul_pd(b01_im, b11_re),
+			_mm_mul_pd(b01_re, b11_im));
+
+		_mm_storeu_pd(pdst + i, _mm_add_pd(u_re, v_re));
+		_mm_storeu_pd(pdst + i + hn, _mm_add_pd(u_im, v_im));
+	}
+#elif FNDSA_NEON
+	const float64_t *p00 = (const float64_t *)b00;
+	const float64_t *p01 = (const float64_t *)b01;
+	const float64_t *p10 = (const float64_t *)b10;
+	const float64_t *p11 = (const float64_t *)b11;
+	float64_t *pdst = (float64_t *)dst;
+	for (size_t i = 0; i < hn; i += 2) {
+		float64x2_t b00_re = vld1q_f64(p00 + i);
+		float64x2_t b00_im = vld1q_f64(p00 + i + hn);
+		float64x2_t b01_re = vld1q_f64(p01 + i);
+		float64x2_t b01_im = vld1q_f64(p01 + i + hn);
+		float64x2_t b10_re = vld1q_f64(p10 + i);
+		float64x2_t b10_im = vld1q_f64(p10 + i + hn);
+		float64x2_t b11_re = vld1q_f64(p11 + i);
+		float64x2_t b11_im = vld1q_f64(p11 + i + hn);
+
+		float64x2_t u_re = vaddq_f64(
+			vmulq_f64(b00_re, b10_re),
+			vmulq_f64(b00_im, b10_im));
+		float64x2_t u_im = vsubq_f64(
+			vmulq_f64(b00_im, b10_re),
+			vmulq_f64(b00_re, b10_im));
+		float64x2_t v_re = vaddq_f64(
+			vmulq_f64(b01_re, b11_re),
+			vmulq_f64(b01_im, b11_im));
+		float64x2_t v_im = vsubq_f64(
+			vmulq_f64(b01_im, b11_re),
+			vmulq_f64(b01_re, b11_im));
+
+		vst1q_f64(pdst + i, vaddq_f64(u_re, v_re));
+		vst1q_f64(pdst + i + hn, vaddq_f64(u_im, v_im));
+	}
+#else
+	/* Scalar fallback (covers RV64D + pure-emulated builds). */
+	for (size_t i = 0; i < hn; i ++) {
+		fpr b00_re = b00[i],      b00_im = b00[i + hn];
+		fpr b01_re = b01[i],      b01_im = b01[i + hn];
+		fpr b10_re = b10[i],      b10_im = b10[i + hn];
+		fpr b11_re = b11[i],      b11_im = b11[i + hn];
+
+		fpr u_re = fpr_add(fpr_mul(b00_re, b10_re), fpr_mul(b00_im, b10_im));
+		fpr u_im = fpr_sub(fpr_mul(b00_im, b10_re), fpr_mul(b00_re, b10_im));
+		fpr v_re = fpr_add(fpr_mul(b01_re, b11_re), fpr_mul(b01_im, b11_im));
+		fpr v_im = fpr_sub(fpr_mul(b01_im, b11_re), fpr_mul(b01_re, b11_im));
+
+		dst[i]      = fpr_add(u_re, v_re);
+		dst[i + hn] = fpr_add(u_im, v_im);
+	}
+#endif
+}
+#endif /* FNDSA_FFSAMP_5N_REDUCED */

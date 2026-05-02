@@ -167,6 +167,15 @@ sign_core(unsigned logn,
 		/* Initialize a sampler state. */
 		sampler_state ss;
 		sampler_init(&ss, logn, subseed, 56);
+#if FNDSA_FFSAMP_5N_REDUCED
+		/* Wire the precomputed basis through to ffsamp's outer level.
+		   When non-NULL, ffsamp_fft_inner's outer call drops l10 from
+		   its persistent set and recomputes it from this basis after
+		   the right recursion (saves 1n FLR at outer level). Inner
+		   recursive calls don't see this — they take the standard
+		   PATH_B body path. */
+		ss.external_basis = external_basis;
+#endif
 
 		/* Compute the lattice basis B = [[g, -f], [G, -F]] in FFT
 		   representation, then compute the Gram matrix G = B*adj(B):

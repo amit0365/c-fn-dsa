@@ -651,6 +651,26 @@ void fpoly_apply_basis_external(unsigned logn, fpr *t0, fpr *t1,
 	const fpr *basis, const uint16_t *hm);
 #endif
 
+#if FNDSA_FFSAMP_5N_REDUCED
+/* ffsamp 5n→4n reduction: compute only the off-diagonal gram entry g01
+ * from an external basis. This is the load-bearing primitive of Path A:
+ * after the right recursion in ffsamp_fft_inner's outer-level body,
+ * l10 has been dropped from tmp[]; we recompute it via g01 = b00·adj(b10)
+ * + b01·adj(b11) (this primitive) followed by l10 = g01 / d00 (via
+ * fpoly_LDL_fft on the recomputed g01 with d00 as g00 input).
+ *
+ * Inputs:
+ *   basis: 4n FLR pointing to b00, b01, b10, b11 contiguous (FFT format).
+ *          Read-only.
+ * Output:
+ *   dst: n FLR receiving g01 (full FFT-domain complex polynomial).
+ *
+ * dst must not alias basis. The primitive is per-coefficient — no
+ * scratch beyond dst. */
+#define fpoly_g01_fft_external   fndsa_fpoly_g01_fft_external
+void fpoly_g01_fft_external(unsigned logn, fpr *dst, const fpr *basis);
+#endif
+
 /* ==================================================================== */
 /*
  * Gaussian sampling.
@@ -669,6 +689,15 @@ typedef struct {
 	shake_context pc;
 #endif
 	unsigned logn;
+#if FNDSA_FFSAMP_5N_REDUCED
+	/* When non-NULL, the outer-level call of ffsamp_fft_inner drops l10
+	   from the persistent set across the right recursion and recomputes
+	   it from this basis (4n FLR, same format as fndsa_compute_basis
+	   output). Set by sign_core only when external_basis was passed via
+	   the with_basis API; left NULL otherwise (in which case the
+	   standard PATH_B body runs even at the outer level). */
+	const fpr *external_basis;
+#endif
 } sampler_state;
 
 /* Initialize the sampler for a given degree and seed. */
