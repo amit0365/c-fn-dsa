@@ -2927,3 +2927,163 @@ fpoly_pathb_finalize(unsigned logn, fpr *c1, fpr *t1_slot,
 #endif
 }
 #endif /* FNDSA_PATH_B */
+
+#if FNDSA_PHASE1_REDUCED
+/* see sign_inner.h.
+ *
+ * Non-destructive variant of fpoly_gram_fft: reads basis from a read-only
+ * external buffer and writes outputs to specified destinations. The
+ * arithmetic is unchanged; only storage layout differs. g00 and g11 are
+ * stored as n/2 FLR each (self-adjoint, real coefficients only); g01 is
+ * full n FLR.
+ *
+ * This is the load-bearing primitive of phase 1 reduction: it allows
+ * gram to read from a flash-resident basis without copying the basis
+ * into tmp[]. */
+TARGET_SSE2 TARGET_NEON
+void
+fpoly_gram_fft_dst(unsigned logn,
+	fpr *g00, fpr *g01, fpr *g11, const fpr *basis)
+{
+	size_t n = (size_t)1 << logn;
+	size_t hn = n >> 1;
+	const fpr *b00 = basis;
+	const fpr *b01 = basis + n;
+	const fpr *b10 = basis + 2 * n;
+	const fpr *b11 = basis + 3 * n;
+
+#if FNDSA_SSE2
+	const double *p00 = (const double *)b00;
+	const double *p01 = (const double *)b01;
+	const double *p10 = (const double *)b10;
+	const double *p11 = (const double *)b11;
+	double *pg00 = (double *)g00;
+	double *pg01 = (double *)g01;
+	double *pg11 = (double *)g11;
+	for (size_t i = 0; i < hn; i += 2) {
+		__m128d b00_re = _mm_loadu_pd(p00 + i);
+		__m128d b00_im = _mm_loadu_pd(p00 + i + hn);
+		__m128d b01_re = _mm_loadu_pd(p01 + i);
+		__m128d b01_im = _mm_loadu_pd(p01 + i + hn);
+		__m128d b10_re = _mm_loadu_pd(p10 + i);
+		__m128d b10_im = _mm_loadu_pd(p10 + i + hn);
+		__m128d b11_re = _mm_loadu_pd(p11 + i);
+		__m128d b11_im = _mm_loadu_pd(p11 + i + hn);
+
+		__m128d g00_re = _mm_add_pd(
+			_mm_add_pd(_mm_mul_pd(b00_re, b00_re),
+				_mm_mul_pd(b00_im, b00_im)),
+			_mm_add_pd(_mm_mul_pd(b01_re, b01_re),
+				_mm_mul_pd(b01_im, b01_im)));
+		__m128d u_re = _mm_add_pd(
+			_mm_mul_pd(b00_re, b10_re),
+			_mm_mul_pd(b00_im, b10_im));
+		__m128d u_im = _mm_sub_pd(
+			_mm_mul_pd(b00_im, b10_re),
+			_mm_mul_pd(b00_re, b10_im));
+		__m128d v_re = _mm_add_pd(
+			_mm_mul_pd(b01_re, b11_re),
+			_mm_mul_pd(b01_im, b11_im));
+		__m128d v_im = _mm_sub_pd(
+			_mm_mul_pd(b01_im, b11_re),
+			_mm_mul_pd(b01_re, b11_im));
+		__m128d g01_re = _mm_add_pd(u_re, v_re);
+		__m128d g01_im = _mm_add_pd(u_im, v_im);
+		__m128d g11_re = _mm_add_pd(
+			_mm_add_pd(_mm_mul_pd(b10_re, b10_re),
+				_mm_mul_pd(b10_im, b10_im)),
+			_mm_add_pd(_mm_mul_pd(b11_re, b11_re),
+				_mm_mul_pd(b11_im, b11_im)));
+
+		_mm_storeu_pd(pg00 + i, g00_re);
+		_mm_storeu_pd(pg01 + i, g01_re);
+		_mm_storeu_pd(pg01 + i + hn, g01_im);
+		_mm_storeu_pd(pg11 + i, g11_re);
+	}
+#elif FNDSA_NEON
+	const float64_t *p00 = (const float64_t *)b00;
+	const float64_t *p01 = (const float64_t *)b01;
+	const float64_t *p10 = (const float64_t *)b10;
+	const float64_t *p11 = (const float64_t *)b11;
+	float64_t *pg00 = (float64_t *)g00;
+	float64_t *pg01 = (float64_t *)g01;
+	float64_t *pg11 = (float64_t *)g11;
+	for (size_t i = 0; i < hn; i += 2) {
+		float64x2_t b00_re = vld1q_f64(p00 + i);
+		float64x2_t b00_im = vld1q_f64(p00 + i + hn);
+		float64x2_t b01_re = vld1q_f64(p01 + i);
+		float64x2_t b01_im = vld1q_f64(p01 + i + hn);
+		float64x2_t b10_re = vld1q_f64(p10 + i);
+		float64x2_t b10_im = vld1q_f64(p10 + i + hn);
+		float64x2_t b11_re = vld1q_f64(p11 + i);
+		float64x2_t b11_im = vld1q_f64(p11 + i + hn);
+
+		float64x2_t g00_re = vaddq_f64(
+			vaddq_f64(vmulq_f64(b00_re, b00_re),
+				vmulq_f64(b00_im, b00_im)),
+			vaddq_f64(vmulq_f64(b01_re, b01_re),
+				vmulq_f64(b01_im, b01_im)));
+		float64x2_t u_re = vaddq_f64(
+			vmulq_f64(b00_re, b10_re),
+			vmulq_f64(b00_im, b10_im));
+		float64x2_t u_im = vsubq_f64(
+			vmulq_f64(b00_im, b10_re),
+			vmulq_f64(b00_re, b10_im));
+		float64x2_t v_re = vaddq_f64(
+			vmulq_f64(b01_re, b11_re),
+			vmulq_f64(b01_im, b11_im));
+		float64x2_t v_im = vsubq_f64(
+			vmulq_f64(b01_im, b11_re),
+			vmulq_f64(b01_re, b11_im));
+		float64x2_t g01_re = vaddq_f64(u_re, v_re);
+		float64x2_t g01_im = vaddq_f64(u_im, v_im);
+		float64x2_t g11_re = vaddq_f64(
+			vaddq_f64(vmulq_f64(b10_re, b10_re),
+				vmulq_f64(b10_im, b10_im)),
+			vaddq_f64(vmulq_f64(b11_re, b11_re),
+				vmulq_f64(b11_im, b11_im)));
+
+		vst1q_f64(pg00 + i, g00_re);
+		vst1q_f64(pg01 + i, g01_re);
+		vst1q_f64(pg01 + i + hn, g01_im);
+		vst1q_f64(pg11 + i, g11_re);
+	}
+#else
+	for (size_t i = 0; i < hn; i ++) {
+		fpr b00_re = b00[i],      b00_im = b00[i + hn];
+		fpr b01_re = b01[i],      b01_im = b01[i + hn];
+		fpr b10_re = b10[i],      b10_im = b10[i + hn];
+		fpr b11_re = b11[i],      b11_im = b11[i + hn];
+
+		g00[i] = fpr_add(
+			fpr_add(fpr_mul(b00_re, b00_re), fpr_mul(b00_im, b00_im)),
+			fpr_add(fpr_mul(b01_re, b01_re), fpr_mul(b01_im, b01_im)));
+
+		fpr u_re = fpr_add(fpr_mul(b00_re, b10_re), fpr_mul(b00_im, b10_im));
+		fpr u_im = fpr_sub(fpr_mul(b00_im, b10_re), fpr_mul(b00_re, b10_im));
+		fpr v_re = fpr_add(fpr_mul(b01_re, b11_re), fpr_mul(b01_im, b11_im));
+		fpr v_im = fpr_sub(fpr_mul(b01_im, b11_re), fpr_mul(b01_re, b11_im));
+		g01[i]      = fpr_add(u_re, v_re);
+		g01[i + hn] = fpr_add(u_im, v_im);
+
+		g11[i] = fpr_add(
+			fpr_add(fpr_mul(b10_re, b10_re), fpr_mul(b10_im, b10_im)),
+			fpr_add(fpr_mul(b11_re, b11_re), fpr_mul(b11_im, b11_im)));
+	}
+#endif
+}
+
+/* see sign_inner.h. Thin wrapper that extracts b01, b11 from the
+   external basis and calls into Path B's preserve-b01 apply_basis. */
+void
+fpoly_apply_basis_external(unsigned logn, fpr *t0, fpr *t1,
+	const fpr *basis, const uint16_t *hm)
+{
+	size_t n = (size_t)1 << logn;
+	/* const-cast: under FNDSA_PATH_B (implied by FNDSA_PHASE1_REDUCED),
+	   apply_basis preserves b01 — does not write to it. */
+	fpr *b01 = (fpr *)(basis + n);
+	fpr *b11 = (fpr *)(basis + 3 * n);
+	fpoly_apply_basis(logn, t0, t1, b01, b11, hm);
+}
+#endif /* FNDSA_PHASE1_REDUCED */

@@ -622,6 +622,35 @@ void fpoly_pathb_finalize(unsigned logn, fpr *c1, fpr *t1_slot,
 	const fpr *zlow, const fpr *zhigh);
 #endif
 
+#if FNDSA_PHASE1_REDUCED
+/* Phase 1 reduction: compute Gram matrix from a read-only external basis
+ * buffer, writing outputs to specified destination locations.
+ *
+ * Inputs:
+ *   basis: 4n FLR pointing to b00, b01, b10, b11 contiguous (FFT format).
+ *          Read-only; safe to live in flash / external buffer.
+ * Outputs:
+ *   g00: n/2 FLR (self-adjoint, real coefficients only)
+ *   g01: n FLR (full)
+ *   g11: n/2 FLR (self-adjoint)
+ *
+ * The output buffers may live anywhere not overlapping the input basis
+ * or each other. Compared to fpoly_gram_fft (which is destructive on
+ * the basis and writes full n FLR for all three outputs), this variant
+ * preserves the basis and writes the compact form directly. */
+#define fpoly_gram_fft_dst   fndsa_fpoly_gram_fft_dst
+void fpoly_gram_fft_dst(unsigned logn,
+	fpr *g00, fpr *g01, fpr *g11, const fpr *basis);
+
+/* Phase 1 reduction: apply the lattice basis to obtain the target vector
+ * [t0, t1] = (g*hm/q, G*hm/q), reading from the external read-only basis
+ * buffer (same format as fpoly_gram_fft_dst). Writes to t0, t1 only.
+ * b01 and b11 are read at offsets n and 3n into basis. */
+#define fpoly_apply_basis_external   fndsa_fpoly_apply_basis_external
+void fpoly_apply_basis_external(unsigned logn, fpr *t0, fpr *t1,
+	const fpr *basis, const uint16_t *hm);
+#endif
+
 /* ==================================================================== */
 /*
  * Gaussian sampling.

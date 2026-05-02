@@ -217,6 +217,38 @@
 #define FNDSA_PATH_B   0
 #endif
 
+/* If FNDSA_PHASE1_REDUCED is 1, the signing path additionally supports
+   precomputed-basis mode: the caller computes B = [[g, -f], [G, -F]] in
+   FFT representation once at key load via fndsa_setup_basis(), stores it
+   in a caller-allocated buffer (typically N_-prefixed on Ledger), and
+   passes it to fndsa_sign_*_with_basis_temp() instead of recomputing
+   per sign. Drops sign_core's phase 1 footprint from 6n FLR to 4n FLR,
+   which (combined with FNDSA_PATH_B's recursive Path B's 5.25n FLR
+   ffsamp peak) reduces the documented signing tmp[] from 51n+31 to
+   ~45n+31 bytes — saves another 3 KiB at FN-DSA-512 / 6 KiB at
+   FN-DSA-1024 on top of FNDSA_PATH_B's 4/8 KiB.
+
+   Implies FNDSA_PATH_B (uses Path B's primitives internally).
+
+   Cost:
+     - Provisioning latency at key load (~0.5-2 s on ST33K1M5)
+     - 32n bytes of caller-supplied persistent storage (typically flash)
+     - API change (additive: new fndsa_*_with_basis_*() function family;
+       existing fndsa_sign*() unchanged)
+
+   For deployment on Ledger / ST33K1M5 with basis stored in app NVRAM:
+   the basis lives in the SE's tamper-resistant flash, the caller uses
+   the atomic-flag-page protocol (fndsa_basis_is_valid + fndsa_setup_basis)
+   for tear-resistance against power loss mid-write.
+
+   To enable: -DFNDSA_PATH_B=1 -DFNDSA_PHASE1_REDUCED=1 at compile time. */
+#ifndef FNDSA_PHASE1_REDUCED
+#define FNDSA_PHASE1_REDUCED   0
+#endif
+#if FNDSA_PHASE1_REDUCED && !FNDSA_PATH_B
+#error FNDSA_PHASE1_REDUCED requires FNDSA_PATH_B
+#endif
+
 /* Automatically recognize some architectures as being "64-bit", which
    mostly means that we assume that 64-bit shifts are constant-time
    with regard to the shift count. */
