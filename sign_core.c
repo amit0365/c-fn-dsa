@@ -146,11 +146,15 @@ sign_core(unsigned logn,
 			shake_extract(sc, rndp, rndlen);
 		}
 
-		/* Hash the message into a polynomial. With Path B + phase 1
-		   reorder, hm slides to offset 48n (after 6n FLR phase 1 peak).
-		   Recursive Path B reduces ffsamp peak to 5.25n FLR but phase 1
-		   still binds at 6n FLR, so hm stays at 48n. */
-#if FNDSA_PATH_B
+		/* hm offset depends on tmp[] layout:
+		     baseline (59n+31):              56n bytes
+		     FNDSA_PATH_B (51n+31):          48n bytes (phase 1 still 6n)
+		     FNDSA_PATH_B + basis (45n+31):  42n bytes (phase 1 = 4n,
+		                                                ffsamp = 5.25n peak) */
+#if FNDSA_PHASE1_REDUCED
+		size_t hm_offset_n = (external_basis != NULL) ? 42 : 48;
+		uint16_t *hm = (uint16_t *)((uint8_t *)tmp + hm_offset_n * n);
+#elif FNDSA_PATH_B
 		uint16_t *hm = (uint16_t *)((uint8_t *)tmp + 48 * n);
 #else
 		uint16_t *hm = (uint16_t *)((uint8_t *)tmp + 56 * n);

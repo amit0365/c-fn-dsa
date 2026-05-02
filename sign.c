@@ -14,7 +14,11 @@ sign_step1(unsigned logn, const uint8_t *sign_key,
 	const uint8_t *ctx, size_t ctx_len,
 	const char *id, const uint8_t *hv, size_t hv_len,
 	const uint8_t *seed, size_t seed_len,
-	uint8_t *sig, void *tmp)
+	uint8_t *sig, void *tmp
+#if FNDSA_PHASE1_REDUCED
+	, const fpr *external_basis  /* NULL = compute internally */
+#endif
+	)
 {
 	size_t n = (size_t)1 << logn;
 
@@ -28,11 +32,22 @@ sign_step1(unsigned logn, const uint8_t *sign_key,
 	int8_t *f = (int8_t *)tmp + 4 * n;
 	int8_t *g = f + n;
 	int8_t *F = g + n;
-#if FNDSA_PATH_B
-	int8_t *G = (int8_t *)tmp + ((size_t)50 << logn);
-#else
-	int8_t *G = (int8_t *)tmp + ((size_t)58 << logn);
+	/* G's offset depends on the chosen tmp[] layout:
+	     baseline (59n+31):           58n bytes
+	     FNDSA_PATH_B (51n+31):       50n bytes
+	     FNDSA_PATH_B + basis (45n+31): 44n bytes  (phase 1 reduction) */
+	size_t G_offset_n;
+#if FNDSA_PHASE1_REDUCED
+	if (external_basis != NULL) {
+		G_offset_n = 44;
+	} else
 #endif
+#if FNDSA_PATH_B
+	{ G_offset_n = 50; }
+#else
+	{ G_offset_n = 58; }
+#endif
+	int8_t *G = (int8_t *)tmp + (G_offset_n << logn);
 
 	/* Decode the private key. Header byte and length have already
 	   been verified. */
@@ -121,7 +136,7 @@ sign_step1(unsigned logn, const uint8_t *sign_key,
 		ctx, ctx_len, id, hv, hv_len,
 		seed, seed_len, sig, tmp
 #if FNDSA_PHASE1_REDUCED
-		, NULL  /* compute basis internally */
+		, external_basis
 #endif
 		);
 
@@ -139,6 +154,11 @@ sign_step1(unsigned logn, const uint8_t *sign_key,
 #else
 #define SIGN_WRAP_TMP_FACTOR  59
 #endif
+#if FNDSA_PHASE1_REDUCED
+#define SIGN_STEP1_NO_BASIS_ARG  , NULL
+#else
+#define SIGN_STEP1_NO_BASIS_ARG
+#endif
 #define SIGN_WRAP(sz)   \
 	static size_t sign_ ## sz(unsigned logn, \
 		const uint8_t *sign_key, \
@@ -150,7 +170,8 @@ sign_step1(unsigned logn, const uint8_t *sign_key,
 		uint8_t tmp[(sz) * SIGN_WRAP_TMP_FACTOR + 31]; \
 		return sign_step1(logn, \
 			sign_key, ctx, ctx_len, id, hv, hv_len, \
-			seed, seed_len, sig, tmp); \
+			seed, seed_len, sig, tmp \
+			SIGN_STEP1_NO_BASIS_ARG); \
 	}
 
 SIGN_WRAP(32)
@@ -238,7 +259,8 @@ sign_wrapper(int weak,
 #endif
 		return sign_step1(logn,
 			sign_key, ctx, ctx_len, id, hv, hv_len,
-			seed, seed_len, sig, tmp);
+			seed, seed_len, sig, tmp
+			SIGN_STEP1_NO_BASIS_ARG);
 	}
 }
 
@@ -345,3 +367,183 @@ fndsa_sign_weak_seeded_temp(const void *sign_key, size_t sign_key_len,
 		ctx, ctx_len, id, hv, hv_len,
 		seed, seed_len, sig, max_sig_len, tmp, tmp_len);
 }
+
+#if FNDSA_PHASE1_REDUCED
+/* ====================================================================
+ * FNDSA_PHASE1_REDUCED: precomputed-basis API
+ * ==================================================================== */
+
+/* see fndsa.h */
+int
+fndsa_compute_basis(
+	const void *sign_key, size_t sign_key_len,
+	void *basis_buf, size_t basis_buf_len)
+{
+	if (sign_key == NULL || sign_key_len < 1) {
+		return 0;
+	}
+	unsigned head = ((const uint8_t *)sign_key)[0];
+	if ((head & 0xF0) != 0x50) {
+		return 0;  /* invalid header byte */
+	}
+	unsigned logn = head & 0x0F;
+	if (logn < 9 || logn > 10) {
+		/* Only secure variants (FN-DSA-512, FN-DSA-1024) supported by
+		   the precomputed-basis API. Weak variants should use the
+		   existing fndsa_*_weak API without precomputation. */
+		return 0;
+	}
+	size_t n = (size_t)1 << logn;
+
+	if (basis_buf == NULL || basis_buf_len < FNDSA_BASIS_SIZE(logn)) {
+		return 0;
+	}
+	if ((uintptr_t)basis_buf & 7) {
+		return 0;  /* fpr requires 8-byte alignment */
+	}
+
+	/* Stack scratch: 8n bytes total. At logn=10, n=1024, that's 8 KiB.
+	   At logn=9, 4 KiB. Acceptable for provisioning-time stack. */
+	uint8_t scratch[(size_t)8 << 10];
+	if (8 * n > sizeof scratch) {
+		return 0;  /* defensive — shouldn't happen at logn 9, 10 */
+	}
+	int8_t *f = (int8_t *)scratch;
+	int8_t *g = f + n;
+	int8_t *F_buf = g + n;
+	int8_t *G_buf = F_buf + n;
+	uint16_t *t0_buf = (uint16_t *)(G_buf + n);
+	uint16_t *t1_buf = t0_buf + n;
+
+	/* Decode key (mirrors sign_step1 but writes to scratch). */
+	unsigned nbits;
+	switch (logn) {
+	case 9: nbits = 6; break;
+	case 10: nbits = 5; break;
+	default: return 0;
+	}
+	size_t flen = (nbits << logn) >> 3;
+	/* Expected sign_key layout: 1 byte header + flen + flen + n bytes. */
+	if (sign_key_len < (size_t)1 + flen + flen + n) {
+		return 0;
+	}
+	const uint8_t *enc = (const uint8_t *)sign_key + 1;
+	if (trim_i8_decode(logn, enc, f, nbits) == 0) return 0;
+	if (trim_i8_decode(logn, enc + flen, g, nbits) == 0) return 0;
+	if (trim_i8_decode(logn, enc + 2 * flen, F_buf, 8) == 0) return 0;
+
+	/* Recompute G via NTT (mirrors sign_step1's logic). */
+	mqpoly_small_to_int(logn, g, t0_buf);
+	mqpoly_small_to_int(logn, f, t1_buf);
+	mqpoly_int_to_ntt(logn, t0_buf);
+	mqpoly_int_to_ntt(logn, t1_buf);
+	if (!mqpoly_div_ntt(logn, t0_buf, t1_buf)) {
+		return 0;
+	}
+	mqpoly_small_to_int(logn, F_buf, t1_buf);
+	mqpoly_int_to_ntt(logn, t1_buf);
+	mqpoly_mul_ntt(logn, t1_buf, t0_buf);
+	mqpoly_ntt_to_int(logn, t1_buf);
+	if (!mqpoly_int_to_small(logn, t1_buf, G_buf)) {
+		return 0;
+	}
+
+	/* Build basis B = [[g, -f], [G, -F]] in FFT representation,
+	   matching basis_to_FFT in sign_core.c. */
+	fpr *basis = (fpr *)basis_buf;
+	fpr *b00 = basis;
+	fpr *b01 = b00 + n;
+	fpr *b10 = b01 + n;
+	fpr *b11 = b10 + n;
+	fpoly_set_small(logn, b01, f);
+	fpoly_set_small(logn, b00, g);
+	fpoly_set_small(logn, b11, F_buf);
+	fpoly_set_small(logn, b10, G_buf);
+	fpoly_FFT(logn, b01);
+	fpoly_FFT(logn, b00);
+	fpoly_FFT(logn, b11);
+	fpoly_FFT(logn, b10);
+	fpoly_neg(logn, b01);
+	fpoly_neg(logn, b11);
+
+	return 1;
+}
+
+/* Internal helper: validates and dispatches to sign_step1 with the
+   external basis. Mirrors sign_wrapper but for the precomputed-basis
+   variant; uses the smaller 45n+31 tmp_len threshold. */
+static size_t
+sign_with_basis_wrapper(
+	const uint8_t *sign_key, size_t sign_key_len,
+	const fpr *basis,
+	const uint8_t *ctx, size_t ctx_len,
+	const char *id, const uint8_t *hv, size_t hv_len,
+	const uint8_t *seed, size_t seed_len,
+	uint8_t *sig, size_t max_sig_len,
+	void *tmp, size_t tmp_len)
+{
+	if (sign_key == NULL || sign_key_len < 1 || basis == NULL) {
+		return 0;
+	}
+	if ((uintptr_t)basis & 7) {
+		return 0;
+	}
+	unsigned head = sign_key[0];
+	if ((head & 0xF0) != 0x50) {
+		return 0;
+	}
+	unsigned logn = head & 0x0F;
+	if (logn < 9 || logn > 10) {
+		return 0;
+	}
+	if (sign_key_len != FNDSA_SIGN_KEY_SIZE(logn)) {
+		return 0;
+	}
+	if (max_sig_len < FNDSA_SIGNATURE_SIZE(logn)) {
+		return 0;
+	}
+	if (tmp == NULL || tmp_len < (((size_t)45 << logn) + 31)) {
+		return 0;
+	}
+
+	return sign_step1(logn,
+		sign_key, ctx, ctx_len, id, hv, hv_len,
+		seed, seed_len, sig, tmp, basis);
+}
+
+/* see fndsa.h */
+size_t
+fndsa_sign_with_basis_temp(
+	const void *sign_key, size_t sign_key_len,
+	const void *basis,
+	const void *ctx, size_t ctx_len,
+	const char *id, const void *hv, size_t hv_len,
+	void *sig, size_t max_sig_len,
+	void *tmp, size_t tmp_len)
+{
+	return sign_with_basis_wrapper(
+		sign_key, sign_key_len,
+		(const fpr *)basis,
+		ctx, ctx_len, id, hv, hv_len,
+		NULL, 0, sig, max_sig_len, tmp, tmp_len);
+}
+
+/* see fndsa.h */
+size_t
+fndsa_sign_seeded_with_basis_temp(
+	const void *sign_key, size_t sign_key_len,
+	const void *basis,
+	const void *ctx, size_t ctx_len,
+	const char *id, const void *hv, size_t hv_len,
+	const void *seed, size_t seed_len,
+	void *sig, size_t max_sig_len,
+	void *tmp, size_t tmp_len)
+{
+	return sign_with_basis_wrapper(
+		sign_key, sign_key_len,
+		(const fpr *)basis,
+		ctx, ctx_len, id, hv, hv_len,
+		seed, seed_len, sig, max_sig_len, tmp, tmp_len);
+}
+
+#endif /* FNDSA_PHASE1_REDUCED */

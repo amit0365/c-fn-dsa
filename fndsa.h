@@ -268,6 +268,69 @@ size_t fndsa_sign_seeded_temp(const void *sign_key, size_t sign_key_len,
 	void *tmp, size_t tmp_len);
 
 /*
+ * Phase 1 reduction (FNDSA_PHASE1_REDUCED only): precomputed-basis API.
+ *
+ * Available only when the library is compiled with both
+ * -DFNDSA_PATH_B=1 -DFNDSA_PHASE1_REDUCED=1. The caller precomputes
+ * the lattice basis B = [[g, -f], [G, -F]] in FFT representation once
+ * at key load via fndsa_compute_basis(), stores it in a caller-managed
+ * buffer (typically persistent flash on Ledger via N_-prefixed globals),
+ * and signs via fndsa_sign_*_with_basis_temp() variants. This reduces
+ * sign tmp[] from 51*n+31 to ~45*n+31 bytes (saves another 3 KiB at
+ * FN-DSA-512 / 6 KiB at FN-DSA-1024 on top of FNDSA_PATH_B's 4/8 KiB).
+ *
+ * Basis buffer size: FNDSA_BASIS_SIZE(logn) = 4 * (1<<logn) * 8 bytes
+ *   = 32 * (1<<logn) bytes
+ *   = 32 KiB at logn=10 (FN-DSA-1024)
+ *   = 16 KiB at logn=9 (FN-DSA-512)
+ *
+ * Per-sign tmp[] size:
+ *   logn   min tmp_len   (with basis)
+ *   ----------------------------------
+ *      9      23071  (= 45*512 + 31)
+ *     10      46111  (= 45*1024 + 31)
+ *
+ * For deployment on memory-constrained SE chips (ST33K1M5 etc.), the
+ * basis buffer can live in flash alongside the key. The library does
+ * NOT manage atomicity of basis storage; callers requiring tear-
+ * resistance against power loss mid-write should implement their own
+ * journaling or atomic-flag protocol on top of these primitives.
+ */
+#define FNDSA_BASIS_SIZE(logn)   ((size_t)32 * ((size_t)1 << (logn)))
+
+/* Precompute the basis B from the signing key and write it to basis_buf.
+ * basis_buf must be at least FNDSA_BASIS_SIZE(logn) bytes (logn is
+ * derived from sign_key's header byte) and 8-byte aligned.
+ *
+ * Returns 1 on success, 0 on error (invalid key, undersized buffer,
+ * misaligned buffer). */
+int fndsa_compute_basis(
+	const void *sign_key, size_t sign_key_len,
+	void *basis_buf, size_t basis_buf_len);
+
+/* Sign with a precomputed basis. tmp_len must be at least 45*n+31 bytes
+ * (down from 59*n+31 baseline / 51*n+31 with FNDSA_PATH_B alone).
+ * basis must point to a valid basis previously computed by
+ * fndsa_compute_basis() from the same sign_key. Behavior is undefined
+ * if basis was computed from a different key. */
+size_t fndsa_sign_with_basis_temp(
+	const void *sign_key, size_t sign_key_len,
+	const void *basis,
+	const void *ctx, size_t ctx_len,
+	const char *id, const void *hv, size_t hv_len,
+	void *sig, size_t max_sig_len,
+	void *tmp, size_t tmp_len);
+
+size_t fndsa_sign_seeded_with_basis_temp(
+	const void *sign_key, size_t sign_key_len,
+	const void *basis,
+	const void *ctx, size_t ctx_len,
+	const char *id, const void *hv, size_t hv_len,
+	const void *seed, size_t seed_len,
+	void *sig, size_t max_sig_len,
+	void *tmp, size_t tmp_len);
+
+/*
  * The fndsa_sign_*() functions declared above require the signing key
  * degree to be secure (512 or 1024). The fndsa_sign_weak_*() functions
  * below are similar, but require the signing key degree to be weak
