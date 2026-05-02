@@ -148,11 +148,13 @@ sign_core(unsigned logn,
 
 		/* hm offset depends on tmp[] layout:
 		     baseline (59n+31):              56n bytes
-		     FNDSA_PATH_B (51n+31):          48n bytes (phase 1 still 6n)
-		     FNDSA_PATH_B + basis (45n+31):  42n bytes (phase 1 = 4n,
-		                                                ffsamp = 5.25n peak) */
+		     FNDSA_PATH_B (51n+31):          48n bytes (phase 1 binds at 6n)
+		     FNDSA_PATH_B + basis (43n+31):  40n bytes (phase 1 = 4n,
+		                                                ffsamp peak = 5n FLR
+		                                                empirically — see
+		                                                test_path_b_peak.c) */
 #if FNDSA_PHASE1_REDUCED
-		size_t hm_offset_n = (external_basis != NULL) ? 42 : 48;
+		size_t hm_offset_n = (external_basis != NULL) ? 40 : 48;
 		uint16_t *hm = (uint16_t *)((uint8_t *)tmp + hm_offset_n * n);
 #elif FNDSA_PATH_B
 		uint16_t *hm = (uint16_t *)((uint8_t *)tmp + 48 * n);

@@ -3,7 +3,7 @@
  * Verifies:
  *   - fndsa_compute_basis() produces a basis usable by fndsa_sign_with_basis_temp()
  *   - signatures verify under fndsa_verify (or fndsa_verify_temp)
- *   - the smaller 45n+31 byte tmp[] is sufficient
+ *   - the smaller 43n+31 byte tmp[] is sufficient
  *   - bit-exact match with existing fndsa_sign_seeded path (sanity check)
  *
  * Build:
@@ -29,7 +29,7 @@ test_at_logn(unsigned logn)
 	size_t vk_len = FNDSA_VRFY_KEY_SIZE(logn);
 	size_t sig_len_max = FNDSA_SIGNATURE_SIZE(logn);
 	size_t basis_len = FNDSA_BASIS_SIZE(logn);
-	size_t tmp_len = ((size_t)45 << logn) + 31;
+	size_t tmp_len = ((size_t)43 << logn) + 31;
 
 	uint8_t *sk = malloc(sk_len);
 	uint8_t *vk = malloc(vk_len);
@@ -75,7 +75,7 @@ test_at_logn(unsigned logn)
 		return 1;
 	}
 
-	/* Sign B: precomputed-basis path with the reduced 45n+31 tmp[]. */
+	/* Sign B: precomputed-basis path with the reduced 43n+31 tmp[]. */
 	size_t lb = fndsa_sign_seeded_with_basis_temp(
 		sk, sk_len, basis,
 		NULL, 0, FNDSA_HASH_ID_RAW, "msg", 3,
@@ -132,7 +132,7 @@ int main(void)
 {
 	printf("=== FNDSA_PHASE1_REDUCED public API end-to-end test ===\n");
 	printf("Verifies fndsa_compute_basis + fndsa_sign_with_basis_temp\n");
-	printf("at the reduced 45n+31 byte tmp_len.\n\n");
+	printf("at the reduced 43n+31 byte tmp_len.\n\n");
 
 	int failures = 0;
 	for (unsigned logn = 9; logn <= 10; logn++) {

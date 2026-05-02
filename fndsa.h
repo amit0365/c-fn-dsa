@@ -231,8 +231,8 @@ size_t fndsa_sign_seeded(const void *sign_key, size_t sign_key_len,
  *
  *    logn   min tmp_len   security                   [PATH_B]   [PATH_B+basis]
  *   ----------------------------------------------------------------------------
- *      9      30239       standard (level I)            26143       23071
- *     10      60447       standard (level V)            52255       46111
+ *      9      30239       standard (level I)            26143       22047
+ *     10      60447       standard (level V)            52255       44063
  *
  *      2        267       none                          (n/a)       (n/a)
  *      3        503       none                            415       (n/a)
@@ -245,7 +245,7 @@ size_t fndsa_sign_seeded(const void *sign_key, size_t sign_key_len,
  * Formulas (n = 2^logn):
  *   Default                              : 59n+31 bytes
  *   With FNDSA_PATH_B                    : 51n+31 bytes  (saves 8n bytes/sign)
- *   With FNDSA_PATH_B + precomputed basis: 45n+31 bytes  (saves 14n bytes/sign,
+ *   With FNDSA_PATH_B + precomputed basis: 43n+31 bytes  (saves 16n bytes/sign,
  *                                                          uses fndsa_*_with_basis_temp)
  *
  * FNDSA_PATH_B notes:

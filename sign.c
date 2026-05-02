@@ -33,13 +33,15 @@ sign_step1(unsigned logn, const uint8_t *sign_key,
 	int8_t *g = f + n;
 	int8_t *F = g + n;
 	/* G's offset depends on the chosen tmp[] layout:
-	     baseline (59n+31):           58n bytes
-	     FNDSA_PATH_B (51n+31):       50n bytes
-	     FNDSA_PATH_B + basis (45n+31): 44n bytes  (phase 1 reduction) */
+	     baseline (59n+31):                58n bytes
+	     FNDSA_PATH_B (51n+31):            50n bytes
+	     FNDSA_PATH_B + basis (43n+31):    42n bytes  (phase 1 reduction;
+	                                                    ffsamp peak at 5n FLR
+	                                                    verified by test_path_b_peak) */
 	size_t G_offset_n;
 #if FNDSA_PHASE1_REDUCED
 	if (external_basis != NULL) {
-		G_offset_n = 44;
+		G_offset_n = 42;
 	} else
 #endif
 #if FNDSA_PATH_B
@@ -502,7 +504,7 @@ sign_with_basis_wrapper(
 	if (max_sig_len < FNDSA_SIGNATURE_SIZE(logn)) {
 		return 0;
 	}
-	if (tmp == NULL || tmp_len < (((size_t)45 << logn) + 31)) {
+	if (tmp == NULL || tmp_len < (((size_t)43 << logn) + 31)) {
 		return 0;
 	}
 

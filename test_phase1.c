@@ -1,7 +1,7 @@
 /* Day 6 paint-and-check test for FNDSA_PHASE1_REDUCED.
  *
  * Strategy: allocate tmp[] at the LARGER PATH_B size (51n+31 bytes), paint
- * the bytes [45n, 51n+31) — which phase-1-reduced signing claims it does
+ * the bytes [43n, 51n+31) — which phase-1-reduced signing claims it does
  * not need — with a sentinel pattern, then run a full signing round via
  * the public _with_basis API. After the call, verify the painted region
  * is byte-identical to the sentinel.
@@ -46,11 +46,11 @@ test_at_logn(unsigned logn)
 	size_t basis_len = FNDSA_BASIS_SIZE(logn);
 
 	/* Allocate tmp[] at the PATH_B size (51n+31), but pass the smaller
-	   45n+31 to the API. The API is only documented to need 45n+31, so
+	   43n+31 to the API. The API is only documented to need 43n+31, so
 	   any writes beyond that are violations of the layout contract. */
 	size_t large_tmp_len = ((size_t)51 << logn) + 31;
-	size_t reduced_tmp_len = ((size_t)45 << logn) + 31;
-	size_t paint_offset = (size_t)45 << logn;
+	size_t reduced_tmp_len = ((size_t)43 << logn) + 31;
+	size_t paint_offset = (size_t)43 << logn;
 	size_t paint_size = large_tmp_len - paint_offset;
 
 	uint8_t *sk = malloc(sk_len);
@@ -73,9 +73,9 @@ test_at_logn(unsigned logn)
 	}
 
 	/* Paint the entire tmp[] with sentinel first, then let the signing
-	   call overwrite the [0, 45n+31) region. The bytes at [45n, 51n+31)
+	   call overwrite the [0, 43n+31) region. The bytes at [43n, 51n+31)
 	   should remain at SENTINEL_BYTE if phase 1 reduced signing respects
-	   its 45n+31 layout claim. */
+	   its 43n+31 layout claim. */
 	memset(tmp, SENTINEL_BYTE, large_tmp_len);
 
 	/* Save a snapshot of the painted region for post-sign comparison. */
@@ -83,7 +83,7 @@ test_at_logn(unsigned logn)
 	memcpy(snapshot, tmp + paint_offset, paint_size);
 
 	/* Sign via the _with_basis API, telling it the buffer is only
-	   45n+31 bytes (so it must not write beyond that). */
+	   43n+31 bytes (so it must not write beyond that). */
 	uint8_t mseed[8] = {0xDE, 0xAD, 0xBE, 0xEF, 0, 0, 0, 0};
 	size_t l = fndsa_sign_seeded_with_basis_temp(
 		sk, sk_len, basis,
@@ -112,7 +112,7 @@ test_at_logn(unsigned logn)
 			violations++;
 			if (violations <= 3) {
 				fprintf(stderr,
-					"logn=%u: violation at byte %zu (offset 45n+%zu): "
+					"logn=%u: violation at byte %zu (offset 43n+%zu): "
 					"got 0x%02x, expected 0x%02x\n",
 					logn, paint_offset + i, i,
 					tmp[paint_offset + i], SENTINEL_BYTE);
@@ -125,14 +125,14 @@ test_at_logn(unsigned logn)
 
 	if (violations > 0) {
 		fprintf(stderr,
-			"logn=%u: FAIL — %d/%zu bytes in [45n, 51n+31) modified\n",
+			"logn=%u: FAIL — %d/%zu bytes in [43n, 51n+31) modified\n",
 			logn, violations, paint_size);
 		return 1;
 	}
 
 	double saved_kib = (double)((((size_t)51 << logn) + 31)
-	                          - (((size_t)45 << logn) + 31)) / 1024.0;
-	printf("PASS logn=%u: bytes [45n, 51n+31) untouched (%zu bytes verified, %.1f KiB saved)\n",
+	                          - (((size_t)43 << logn) + 31)) / 1024.0;
+	printf("PASS logn=%u: bytes [43n, 51n+31) untouched (%zu bytes verified, %.1f KiB saved)\n",
 		logn, paint_size, saved_kib);
 	return 0;
 }
@@ -140,8 +140,8 @@ test_at_logn(unsigned logn)
 int main(void)
 {
 	printf("=== FNDSA_PHASE1_REDUCED paint-and-check (Day 6) ===\n");
-	printf("Allocates tmp[] at 51n+31 bytes (PATH_B size), passes 45n+31 to\n");
-	printf("the with-basis API, paints bytes [45n, 51n+31) with sentinel,\n");
+	printf("Allocates tmp[] at 51n+31 bytes (PATH_B size), passes 43n+31 to\n");
+	printf("the with-basis API, paints bytes [43n, 51n+31) with sentinel,\n");
 	printf("and verifies sentinel is intact post-sign. Catches in-buffer\n");
 	printf("layout violations that ASAN can't see.\n\n");
 
@@ -152,7 +152,7 @@ int main(void)
 
 	printf("\n");
 	if (failures == 0) {
-		printf("ALL TESTS PASSED — phase 1 reduction respects its 45n+31 layout\n");
+		printf("ALL TESTS PASSED — phase 1 reduction respects its 43n+31 layout\n");
 		return 0;
 	}
 	fprintf(stderr, "FAILURES: %d test case(s)\n", failures);
