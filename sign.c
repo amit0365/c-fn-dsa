@@ -37,7 +37,10 @@ sign_step1(unsigned logn, const uint8_t *sign_key,
 	     FNDSA_PATH_B (51n+31):            50n bytes
 	     FNDSA_PATH_B + basis (43n+31):    42n bytes  (phase 1 reduction;
 	                                                    ffsamp peak at 5n FLR
-	                                                    verified by test_path_b_peak) */
+	                                                    verified by test_path_b_peak)
+	     FNDSA_FFSAMP_5N + basis (35n+31): 34n bytes  (Path A: ffsamp outer
+	                                                    peak drops to 4n FLR
+	                                                    via l10 recompute) */
 	size_t G_offset_n;
 #if FNDSA_PHASE1_REDUCED
 	if (external_basis != NULL) {

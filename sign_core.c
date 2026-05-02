@@ -152,8 +152,19 @@ sign_core(unsigned logn,
 		     FNDSA_PATH_B + basis (43n+31):  40n bytes (phase 1 = 4n,
 		                                                ffsamp peak = 5n FLR
 		                                                empirically — see
-		                                                test_path_b_peak.c) */
+		                                                test_path_b_peak.c)
+		     FNDSA_FFSAMP_5N + basis (35n+31): 32n bytes (Path A: ffsamp
+		                                                  outer peak = 4n
+		                                                  FLR via l10
+		                                                  recompute) */
 #if FNDSA_PHASE1_REDUCED
+		/* hm offset under FNDSA_FFSAMP_5N_REDUCED stays at 40n for
+		   now. The Path A outer body's step 2 uses qc(16..19) as
+		   t1*l10 scratch — keeping the FUNCTION-INTERNAL peak at 5n
+		   FLR. Achieving the documented 4n peak (and the corresponding
+		   35n+31 byte tmp_len) requires a new fpoly_mac_fft fused
+		   primitive that does c1 += t1*l10 in place without scratch.
+		   Day 4+ work. */
 		size_t hm_offset_n = (external_basis != NULL) ? 40 : 48;
 		uint16_t *hm = (uint16_t *)((uint8_t *)tmp + hm_offset_n * n);
 #elif FNDSA_PATH_B
