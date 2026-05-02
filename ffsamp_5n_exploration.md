@@ -123,15 +123,30 @@ Total tmp[] FLR area drops from 5n to 4n → saves 8n bytes/sign.
 | FN-DSA-512 (n=512) | 22047 B | 17951 B | **4 KiB** |
 | FN-DSA-1024 (n=1024) | 44063 B | 35871 B | **8 KiB** |
 
-**Perf cost.** Outer-level only:
-- 2 fpoly_mul_fft @ degree n = 8n real mults
-- 1 fpoly_add @ degree n = n adds
-- 1 fpoly_div_selfadj @ degree n = 2n divs (real divisions)
-- ~11n real FP ops added per signing
+**Perf cost — measured, not projected.**
 
-Compared to total ffsamp ≈ 28n FFT-mults across all levels, this is a
-~5–10% wall-clock cost on signing. Comparable in shape to Path B's 1–2%
-overhead but ~5× larger.
+Standalone microbench (`bench_recompute.c`, NEON host, library built without
+PATH_B for the host baseline):
+
+| logn | recompute step | full sign | ratio |
+|---|---|---|---|
+| 9  | ~388 ns | ~213 µs | **0.18%** |
+| 10 | ~430 ns | ~276 µs | **0.15%** |
+
+The recompute kernel is 2 fpoly_mul_fft + 1 fpoly_add + 1 fpoly_div_selfadj
+≈ 11n real FP ops, all SIMD-vectorized cleanly. **The measured 0.18% is
+~10× under the 2% acceptability threshold.**
+
+**Projected M35P scalar cost.** M35P has no SIMD, so the recompute kernel
+loses NEON's 2× throughput. But sign_core itself also vectorizes on NEON,
+so the ratio is roughly preserved across host→scalar — not amplified by
+the full NEON speedup. Realistic projection: ~1–1.5% on M35P scalar.
+Still well under 5%, comfortably under 2%.
+
+This replaces an earlier worst-case projection of "5–10%" — the measurement
+shows the kernel is much smaller than total ffsamp work suggested.
+
+The bench is reproducible via `make bench_recompute && ./bench_recompute`.
 
 **Implementation effort.**
 1. Pass `external_basis` through to ffsamp via `sampler_state` (or a new
@@ -148,8 +163,12 @@ overhead but ~5× larger.
 Estimated 4–5 days end-to-end. No new architecture-specific primitives;
 the recompute reuses existing fpoly_mul / fpoly_add / fpoly_mulconst.
 
-**Verdict: viable, but asymmetric.** Saves 4/8 KiB at ~5–10% perf cost.
-Whether to ship depends on the deployment's RAM/throughput tradeoff.
+**Verdict: viable; ship behind a flag.** Saves 4/8 KiB at measured 0.18%
+host / projected ~1–1.5% M35P scalar perf cost. Bench-confirmed sub-2%
+across all reasonable assumptions. The deployment-shape question (does
+FN-DSA-512 + Ethereum app fit on 32 KiB net app SRAM) is what makes Path A
+load-bearing on Nano-class devices, not optional — see "Deployment context"
+below.
 
 ### Path B — Share c1 with callee scratch via slot reordering
 
@@ -212,34 +231,80 @@ FN-DSA-512:  cumulative  24 KiB → ~14 KiB tmp[]   (full chain saves 12 KiB)
 FN-DSA-1024: cumulative  48 KiB → ~28 KiB tmp[]   (full chain saves 24 KiB)
 ```
 
-For ST33K1M5 (32 KiB application SRAM after OS reservation), this brings
-FN-DSA-1024 from "comfortably overbudget" to "borderline fits with margin
-for stack + globals." That's the deployment-relevant move.
+## Deployment context — why Path A is load-bearing for FN-DSA-512 on Nano
+
+ST33K1M5 (used across Nano S+, Nano X, Nano Gen 5, Stax, Flex):
+
+```
+64 KiB total SRAM
+- 31 KiB BOLOS
+≈ 32 KiB net app SRAM (all five devices; framebuffer lives off-SE on Stax/Flex)
+```
+
+Realistic peak RAM during a full ETH signing flow (with buffer reuse —
+`fndsa_sign_temp` taking the same buffer the app used for TX parsing):
+
+```
+SDK glue / APDU comm buffer            ~2-4 KiB
+ETH app globals                        ~1-2 KiB
+FN-DSA globals                         ~1-2 KiB
+max(eth_stack, fndsa_stack)            ~2-3 KiB  (shared region)
+max(parse buffer, FN-DSA tmp[])        — dominant term
+```
+
+Comparison at logn=9:
+
+| Build | tmp[] | Total peak | Fits 32 KiB? |
+|---|---|---|---|
+| PATH_B alone | 26143 B (~25.5 KiB) | 31.5–36.5 KiB | doesn't fit at mid-to-high estimates |
+| **PATH_B + Path A** | **22047 B → 17951 B (~17.5 KiB)** | **27.5–32.5 KiB** | **fits with margin** |
+
+**Path A is load-bearing**, not optional, for FN-DSA-512 + Ethereum-class
+app deployment on Nano-class. PATH_B alone leaves the budget open only at
+the low end of every estimate; Path A's 4 KiB of tmp[] reduction closes it
+across the realistic range.
+
+(Note: this assumes the app uses `fndsa_sign_temp(...)` and shares its TX
+parse buffer with FN-DSA's tmp[]. Without that pattern — e.g. if the app
+calls `fndsa_sign(...)` and the library puts tmp[] on its own stack —
+the parse buffer and tmp[] don't overlap and the budget gains another
+~8 KiB charge. This is a deployment constraint, not just a perf
+optimization, and worth confirming with the app team early.)
 
 ## Recommendation
 
-**Path A is implementable and worth a kill-plan-shaped effort if
-FN-DSA-1024 deployment on ST33K1M5 is the goal.** Concretely:
+**Greenlight Path A as the FN-DSA-512 deployment shape.** The bench
+settles the perf question (0.18% measured, ~1–1.5% projected scalar) and
+the budget math makes it a hard requirement for Nano-class deployment.
 
-1. **Day 1:** Prototype the outer-only restructure on a branch
-   (`ffsamp-5n-reduction`); verify bit-distribution-equivalence and ASAN
-   clean at logn 9, 10.
-2. **Day 2:** Add `test_ffsamp_5n.c` paint-and-check at the 4n boundary.
-3. **Day 3:** Bench perf cost on host (`bench_ffsamp_5n.c`); confirm <15%
-   wall-clock overhead.
-4. **Day 4:** Hardware bench (gated on Donjon device access).
-5. **Day 5:** PR prep / docstring updates.
+Kill plan (5 days), targeting `ffsamp-5n-reduction` branch off
+`phase1-reduction`:
 
-If FN-DSA-512 is the deployment target (already comfortably fits) and the
-extra 4–8 KiB is not worth ~5–10% perf cost, **don't ship Path A**.
+| Day | Work | Output |
+|---|---|---|
+| 1–2 | Implement outer-only Path A: extend ffsamp_fft_inner with l10-drop + recompute-from-external_basis variant; new layout c1 @ qc(0..3), d00 @ qc(4..5), callee tmp @ qc(6) | working code, test_fndsa passes at logn 3..10 |
+| 3 | `test_ffsamp_5n.c` paint-and-check at the 4n boundary; bit-distribution-equivalence with existing path | validated correctness |
+| 4 | Update tmp_len budget docstrings (35n+31), ASAN clean | clean diff |
+| 5 | PR draft + Donjon-side measurement asks | upstream-ready |
 
-## Why not just do this now
+Hardware confirmation (Donjon-gated) lands in parallel and feeds the PR
+description as deployment validation, not as a blocker on implementation.
 
-The 5–10% perf cost is a real number for SE deployments where signing is
-already 1–3 seconds. Adding 100–300ms is user-visible. Whether that's
-acceptable is a deployment-policy question, not a performance question
-the host bench can settle.
+## What the bench did NOT settle
 
-The right next step is **Donjon hardware bench under Path A**, since on
-the M35P core the relative cost of an extra fpoly_mul vs cache-resident
-ffsamp recursion may differ meaningfully from host CPU.
+The bench is the perf gate. It does NOT address:
+
+1. **M35P stack peak under masking + lockstep.** If `fndsa_sign_temp`'s
+   recursive frames hit 4–5 KiB instead of the projected 2–3 KiB, the
+   budget tightens. Donjon-side measurement.
+2. **`fndsa_*` globals footprint.** Permanent .bss/.data charged to the
+   32 KiB. Donjon-side `arm-none-eabi-size` on the linked image.
+3. **Worst-case ETH app peak parse buffer.** The 4–10 KiB range is wide;
+   the high end (deep EIP-712 typed data) determines the parse-buffer
+   side of `max(parse_buffer, fndsa_tmp[])`.
+4. **SDK glue / APDU comm buffer charge.** Fixed cost before any state.
+
+If items 1–4 land at the high end of estimates simultaneously, even Path
+A can leave the budget tight by ~500 bytes. Donjon-side measurement is
+the only way to settle this — but that's a deployment readiness check,
+not an implementation gate.

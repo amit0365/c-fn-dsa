@@ -153,3 +153,12 @@ test_sign.o: test_sign.c sign_sampler.c sign_core.c fndsa.h sign_inner.h inner.h
 
 speed_fndsa.o: speed_fndsa.c fndsa.h inner.h
 	$(CC) $(CFLAGS) -c -o speed_fndsa.o speed_fndsa.c
+
+# Phase-1 recompute-step microbench (option-1 standalone microbench).
+# Times g01 = b00*adj(b10) + b01*adj(b11) and l10 = g01/d00 against full
+# fndsa_sign cost; reports a host-CPU ratio for the M35P viability filter.
+bench_recompute.o: bench_recompute.c fndsa.h sign_inner.h inner.h
+	$(CC) $(CFLAGS) -c -o bench_recompute.o bench_recompute.c
+
+bench_recompute: $(OBJ) bench_recompute.o
+	$(LD) $(LDFLAGS) -o bench_recompute bench_recompute.o $(OBJ) $(LIBS)
