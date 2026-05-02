@@ -229,24 +229,38 @@ size_t fndsa_sign_seeded(const void *sign_key, size_t sign_key_len,
  * systems that have only small stacks. Temporary area sizes are as
  * follows:
  *
- *    logn   min tmp_len   security
- *   -----------------------------------------
- *      9      30239       standard (level I)         [26143 with FNDSA_PATH_B]
- *     10      60447       standard (level V)         [52255 with FNDSA_PATH_B]
+ *    logn   min tmp_len   security                   [PATH_B]   [PATH_B+basis]
+ *   ----------------------------------------------------------------------------
+ *      9      30239       standard (level I)            26143       23071
+ *     10      60447       standard (level V)            52255       46111
  *
- *      2        267       none
- *      3        503       none                       [415 with FNDSA_PATH_B]
- *      4        975       none                       [847 with FNDSA_PATH_B]
- *      5       1919       none                       [1663 with FNDSA_PATH_B]
- *      6       3807       none                       [3295 with FNDSA_PATH_B]
- *      7       7583       very weak                  [6559 with FNDSA_PATH_B]
- *      8      15135       presumed weak              [13087 with FNDSA_PATH_B]
+ *      2        267       none                          (n/a)       (n/a)
+ *      3        503       none                            415       (n/a)
+ *      4        975       none                            847       (n/a)
+ *      5       1919       none                           1663       (n/a)
+ *      6       3807       none                           3295       (n/a)
+ *      7       7583       very weak                      6559       (n/a)
+ *      8      15135       presumed weak                 13087       (n/a)
  *
- * (Default formula: 59*n+31 bytes, for degree n = 2^logn.
- *  With FNDSA_PATH_B compile flag: 51*n+31 bytes — saves 8n bytes per
- *  signing via the t0+t1*l10 absorption + tight 24-quarter ffsamp layout.
- *  Bit-exact KAT compat at logn>=3, ~1-2% perf overhead. logn=2 not
- *  supported under PATH_B due to FP edge cases at n=4.)
+ * Formulas (n = 2^logn):
+ *   Default                              : 59n+31 bytes
+ *   With FNDSA_PATH_B                    : 51n+31 bytes  (saves 8n bytes/sign)
+ *   With FNDSA_PATH_B + precomputed basis: 45n+31 bytes  (saves 14n bytes/sign,
+ *                                                          uses fndsa_*_with_basis_temp)
+ *
+ * FNDSA_PATH_B notes:
+ *   Uses the t0+t1*l10 absorption + tight 24-quarter ffsamp layout.
+ *   Bit-exact KAT compatibility at logn>=3, ~1-2% perf overhead.
+ *   logn=2 not supported (FP edge case at n=4 — FN-DSA does not define
+ *   n=4 as a parameter set).
+ *
+ * FNDSA_PATH_B + precomputed basis notes:
+ *   The caller precomputes the lattice basis B once via fndsa_compute_basis()
+ *   into a separate persistent buffer (FNDSA_BASIS_SIZE(logn) = 32n bytes;
+ *   on Ledger / SE deployment this lives in NV flash as an N_-prefixed global).
+ *   Signing then uses fndsa_sign_with_basis_temp() which reads the basis from
+ *   the external buffer instead of recomputing per sign. Only the secure
+ *   parameter sets (logn=9, 10) are supported by the precomputed-basis API.
  *
  * An undersized temporary area triggers an error (returned value is zero).
  */
