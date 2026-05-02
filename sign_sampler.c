@@ -1278,12 +1278,14 @@ ffsamp_fft_inner(sampler_state *ss, unsigned logn, fpr *tmp)
 		   d00 unchanged at qc(12..13). */
 		fpoly_LDL_fft(logn, qc(12), qc(8), qc(14));
 
-		/* Step 2 (Path A fused MAC): c1 = t0 + t1·l10 in place at
-		   qc(0..3). Uses fpoly_mac_fft (per-coefficient complex MAC)
-		   with NO scratch beyond registers — eliminates the qc(16..19)
-		   t1*l10 product slot that the un-fused chain would need. This
-		   is what keeps the function-internal peak at 4n FLR. */
-		fpoly_mac_fft(logn, qc(0), qc(4), qc(8));
+		/* Step 2 (Path A fused multiply-add): c1 = t0 + t1·l10 in
+		   place at qc(0..3). Uses fpoly_muladd_fft (per-coefficient
+		   complex fused multiply-add — FMA, distinct from the crypto
+		   MAC notion) with NO scratch beyond registers — eliminates
+		   the qc(16..19) t1*l10 product slot that the un-fused chain
+		   would need. This is what keeps the function-internal peak
+		   at 4n FLR. */
+		fpoly_muladd_fft(logn, qc(0), qc(4), qc(8));
 
 		/* Step 3: relocate t1 to qc(8..11), overwriting stale l10
 		   (no longer needed after step 2 consumed it). Now qc(4..7)

@@ -532,8 +532,10 @@ void fpoly_neg(unsigned logn, fpr *a);
 #define fpoly_mul_fft   fndsa_fpoly_mul_fft
 void fpoly_mul_fft(unsigned logn, fpr *a, const fpr *b);
 
-/* Fused multiply-accumulate: c += a · b (FFT representation, in place
- * at c). Per complex coefficient k:
+/* Fused multiply-add (FMA): c += a · b (FFT representation, in place
+ * at c). Note: this is an arithmetic fused-multiply-add — analogous to
+ * Intel's _mm_fmadd_pd or ARM's vfmaq_f64 — NOT a cryptographic
+ * Message Authentication Code. Per complex coefficient k:
  *     c_re[k] = c_re[k] + (a_re[k]·b_re[k] − a_im[k]·b_im[k])
  *     c_im[k] = c_im[k] + (a_re[k]·b_im[k] + a_im[k]·b_re[k])
  *
@@ -542,8 +544,8 @@ void fpoly_mul_fft(unsigned logn, fpr *a, const fpr *b);
  * registers. Eliminates the qc(16..19) scratch usage that would
  * otherwise blow past the function's 4n FLR peak boundary. */
 #if FNDSA_FFSAMP_5N_REDUCED
-#define fpoly_mac_fft   fndsa_fpoly_mac_fft
-void fpoly_mac_fft(unsigned logn, fpr *c, const fpr *a, const fpr *b);
+#define fpoly_muladd_fft   fndsa_fpoly_muladd_fft
+void fpoly_muladd_fft(unsigned logn, fpr *c, const fpr *a, const fpr *b);
 #endif
 
 /* unused

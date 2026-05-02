@@ -1835,7 +1835,8 @@ fpoly_mul_fft(unsigned logn, fpr *a, const fpr *b)
 #if FNDSA_FFSAMP_5N_REDUCED
 /* see sign_inner.h.
  *
- * Per-coefficient fused multiply-accumulate in FFT representation:
+ * Per-coefficient fused multiply-add (FMA, arithmetic — NOT a crypto
+ * Message Authentication Code) in FFT representation:
  *     c[k] = c[k] + a[k] · b[k]    (complex)
  *
  * In place at c; reads a and b non-destructively. No scratch beyond
@@ -1844,7 +1845,7 @@ fpoly_mul_fft(unsigned logn, fpr *a, const fpr *b)
  * c1 += t1·l10 within the 4n FLR boundary of Path A's outer body. */
 TARGET_SSE2 TARGET_NEON
 void
-fpoly_mac_fft(unsigned logn, fpr *c, const fpr *a, const fpr *b)
+fpoly_muladd_fft(unsigned logn, fpr *c, const fpr *a, const fpr *b)
 {
 	size_t hn = (size_t)1 << (logn - 1);
 #if FNDSA_SSE2

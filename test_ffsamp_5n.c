@@ -14,7 +14,7 @@
  * fndsa_sign_seeded_with_basis_temp API, passing 37n+31 as tmp_len. After the
  * call, verify the painted region is byte-identical to the sentinel.
  *
- * Path A's outer-level body uses fpoly_mac_fft (per-coefficient complex
+ * Path A's outer-level body uses fpoly_muladd_fft (per-coefficient complex
  * multiply-accumulate) in step 2 to compute c1 += t1·l10 in place at qc(0..3),
  * eliminating the qc(16..19) t1*l10 product slot that the un-fused chain
  * needed. This is what brings the function-internal peak from 5n FLR to 4n
@@ -123,7 +123,7 @@ int main(void)
 {
 	printf("=== FNDSA_FFSAMP_5N_REDUCED paint-and-check (Day 3+4) ===\n");
 	printf("Verifies the new outer-level Path A body at the tightened\n");
-	printf("37n+31 byte tmp_len boundary. Path A uses fpoly_mac_fft (Day 4)\n");
+	printf("37n+31 byte tmp_len boundary. Path A uses fpoly_muladd_fft (Day 4)\n");
 	printf("for in-place c1 = t0 + t1·l10, eliminating qc(16..19) scratch and\n");
 	printf("achieving 4n FLR ffsamp peak.\n\n");
 

@@ -163,7 +163,7 @@ sign_core(unsigned logn,
 		     PATH_B + basis (43n+31):           40n bytes
 		     PATH_B + basis + FFSAMP_5N (37n+31): 34n bytes
 		           (Path A: ffsamp peak = 4n FLR at outer level via
-		           fpoly_mac_fft fused primitive; FP-stays post-ffsamp
+		           fpoly_muladd_fft fused primitive; FP-stays post-ffsamp
 		           scratch ends at byte 34n, so hm at 34n is the first
 		           safe slot. tmp_len = 37n+31 reserves 2 extra bytes
 		           per n above what scalar/integer post-ffsamp needs —
