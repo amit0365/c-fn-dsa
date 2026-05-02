@@ -511,6 +511,15 @@ sign_with_basis_wrapper(
 	if (max_sig_len < FNDSA_SIGNATURE_SIZE(logn)) {
 		return 0;
 	}
+	/* The with-basis API contract: basis MUST be non-NULL. If it were
+	   NULL, sign_core would fall back to the no-external-basis path
+	   which uses a larger tmp[] layout (51n+31 bytes for hm+G); since
+	   our min_tmp check is sized for the with-basis path (37n+31 under
+	   FFSAMP_5N, 43n+31 otherwise), accepting NULL basis would produce
+	   a buffer overflow. Reject explicitly. */
+	if (basis == NULL) {
+		return 0;
+	}
 #if FNDSA_FFSAMP_5N_REDUCED
 	/* Path A min: 4n FLR (ffsamp peak) + post-ffsamp scratch + hm + G + 31.
 	   FP-stays post-ffsamp scratch ends at 34n bytes (w0+w1+f+g), then

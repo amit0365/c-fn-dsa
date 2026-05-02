@@ -130,6 +130,25 @@ test_at_logn(unsigned logn)
 	}
 	printf("        undersized tmp_len rejection: OK\n");
 
+	/* Test NULL basis rejection. With FFSAMP_5N enabled, the API min
+	   tmp_len = 37n+31 is sized for the with-basis path. If basis is
+	   NULL, sign_core would fall back to the no-basis layout (51n+31
+	   under PATH_B+PHASE1) and write past tmp[]'s end → buffer
+	   overflow. The wrapper must reject NULL basis explicitly. */
+	size_t ld = fndsa_sign_seeded_with_basis_temp(
+		sk, sk_len, NULL,  /* NULL basis */
+		NULL, 0, FNDSA_HASH_ID_RAW, "msg", 3,
+		mseed, sizeof mseed,
+		sig_with_basis, sig_len_max,
+		tmp_basis, tmp_len);
+	if (ld != 0) {
+		fprintf(stderr,
+			"logn=%u: NULL basis NOT rejected (returned %zu)\n",
+			logn, ld);
+		return 1;
+	}
+	printf("        NULL basis rejection: OK\n");
+
 	free(tmp_basis); free(tmp_existing); free(basis);
 	free(sig_with_basis); free(sig_existing); free(vk); free(sk);
 	return 0;
