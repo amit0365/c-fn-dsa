@@ -182,106 +182,103 @@
 #endif
 #endif
 
-/* If FNDSA_PATH_B is 1, the signing path uses an alternative layout that
-   reduces tmp[] from 59*n+31 to 51*n+31 bytes (saves 8 KiB at logn=10,
-   4 KiB at logn=9). Two algorithmic changes compose to give the saving:
+/* If FNDSA_LOW_RAM is 1, the signing path enables the full RAM-reduction
+   stack, taking signing tmp[] from 59n+31 to 37n+31 bytes (~30 KB -> 19 KB
+   at FN-DSA-512).
 
-     1. ffsamp_fft_inner absorbs t1*l10 into t0 before the right-subtree
-        recursion (rather than carrying both t0 and t1 through), reducing
-        the persistent set in the recursive frame from 14 quarters to 10.
-        See sign_sampler.c. The function-internal peak is further reduced
-        by a fused merge+sub primitive (fpoly_pathb_finalize) that
-        eliminates the z1*l10 scratch buffer.
+   Glossary
+   --------
+   n      : polynomial degree, n = 2^logn. FN-DSA-512 has logn=9, n=512;
+            FN-DSA-1024 has logn=10, n=1024. Buffer sizes scale with n.
+   fpr    : one polynomial coefficient in FFT representation, stored as
+            an IEEE 754 double (= one C `double` = 8 bytes). Polynomials
+            of degree n are arrays of n fpr (= 8n bytes). Buffer sizes
+            below are quoted as "kn fpr" meaning k * n fpr = 8 * k * n bytes
+            (e.g. "4n fpr" at FN-DSA-512 = 4 * 512 * 8 = 16384 bytes).
+   l10    : the LDL off-diagonal element at outer recursion of ffsamp.
+   b00/b01/b10/b11 : the four polynomial entries of the lattice basis B in
+            FFT representation; B = [[g, -f], [G, -F]].
 
-     2. sign_core reorders apply_basis to run BEFORE gram_fft, so the
-        b01 polynomial does not need to be backed up to scratch (the
-        baseline keeps a 1n-FLR copy because gram_fft destroys b01 and
-        apply_basis still needs it). apply_basis is correspondingly
-        modified to preserve b01 instead of consuming it.
+   Three algorithmic layers compose:
 
-   FP operation order changes vs baseline. The FN-DSA spec only requires
-   distribution equivalence, which is preserved (same algorithm with
-   different rounding ordering). Empirical bonus: at logn>=3, signatures
-   produced under FNDSA_PATH_B match Pornin's baseline KATs bit-exact in
-   ~thousands of test signatures; the discrete Gaussian sampler at the
-   leaf rounds to integers and absorbs sub-bit FP perturbations.
+   Layer 1 (recursive ffsamp restructure): ffsamp_fft_inner absorbs
+   t1*l10 into t0 before the right-subtree recursion (rather than carrying
+   both t0 and t1 through), reducing the persistent set in the recursive
+   frame from 3.5n fpr to 2.5n fpr (saves 1n fpr per recursion level). 
+   The per-frame peak (the most memory used at any single point inside
+   ffsamp_fft_inner's body) is further reduced by a fused merge+sub
+   primitive (fpoly_pathb_finalize) that computes tb0 = t0 - z1*l10
+   per coefficient in CPU registers, with no intermediate buffer for
+   the z1*l10 product. sign_core reorders apply_basis
+   to run BEFORE gram_fft, so b01 does not need to be backed up to
+   scratch (the baseline keeps a 1n-fpr copy because gram_fft destroys
+   b01 and apply_basis still needs it); apply_basis is modified to
+   preserve b01 instead of consuming it. Layer 1 alone would save
+   8 KiB at logn=10 / 4 KiB at logn=9.
 
-   logn=2 is not supported under FNDSA_PATH_B (an FP edge case at n=4
-   produces signatures that fail to verify on some inputs). FN-DSA does
-   not define a security level at logn=2, so this is not a spec gap.
+   Layer 2 (precomputed-basis API): the caller computes B = [[g, -f],
+   [G, -F]] in FFT representation once at key provisioning via
+   fndsa_setup_basis() and stores it persistently — typically in flash
+   (NVRAM on Ledger ST33K1M5; .data on hosted platforms) — so it does
+   not occupy per-sign RAM. The stored basis (4n fpr = 32n bytes;
+   16 KiB at FN-DSA-512, 32 KiB at FN-DSA-1024) is then passed to
+   fndsa_sign_*_with_basis_temp() each sign instead of being recomputed
+   from f, g, F, G. Drops sign_core's per-sign footprint from 6n fpr
+   to 4n fpr (an additional 3 KiB at FN-DSA-512 / 6 KiB at FN-DSA-1024
+   on top of Layer 1).
 
-   ~1-2% perf overhead at logn=9, 10 (measured wall-time, ~200 µs/sign).
+   Layer 3 (outer-level l10 drop): the outer-level call of
+   ffsamp_fft_inner drops l10 from its persistent set across the right
+   recursion. After the recursion returns, l10 is recomputed from the
+   flash-resident basis B that Layer 2 already made available (the
+   external_basis pointer in sampler_state — "external" because it
+   lives outside the per-sign tmp[] buffer, in flash, supplied by the
+   caller). One polynomial multiplication of B's rows is enough:
+   g01 = b00*adj(b10) + b01*adj(b11), then l10 = g01 / d00. This
+   shrinks the OUTER-level ffsamp peak from 5n fpr to 4n fpr (37n+31).
+   Inner recursion levels are unaffected — they would have to redo the
+   entire LDL chain to recover their own l10 from B, which would cost
+   more than just keeping it in scratch. Saves another 4 KiB at
+   FN-DSA-512 / 8 KiB at FN-DSA-1024.
 
-   To enable: -DFNDSA_PATH_B=1 at compile time. */
-#ifndef FNDSA_PATH_B
-#define FNDSA_PATH_B   0
-#endif
+   Note: The FP operation order changes vs baseline. But it produces
+   bit-exact outputs with respect to the baseline at every supported logn
+   (2..10). Verified by test_kat_stress (1000 seeds at logn 2..8, 100 at
+   logn=9, 20 at logn=10) — fingerprints over (sk||vk||sig) match
+   byte-for-byte between baseline and LOW_RAM.
 
-/* If FNDSA_PHASE1_REDUCED is 1, the signing path additionally supports
-   precomputed-basis mode: the caller computes B = [[g, -f], [G, -F]] in
-   FFT representation once at key load via fndsa_setup_basis(), stores it
-   in a caller-allocated buffer (typically N_-prefixed on Ledger), and
-   passes it to fndsa_sign_*_with_basis_temp() instead of recomputing
-   per sign. Drops sign_core's phase 1 footprint from 6n FLR to 4n FLR,
-   which (combined with FNDSA_PATH_B's recursive Path B's 5.25n FLR
-   ffsamp peak) reduces the documented signing tmp[] from 51n+31 to
-   ~45n+31 bytes — saves another 3 KiB at FN-DSA-512 / 6 KiB at
-   FN-DSA-1024 on top of FNDSA_PATH_B's 4/8 KiB.
-
-   Implies FNDSA_PATH_B (uses Path B's primitives internally).
+   Performance (Δ vs baseline, median of NTESTS=10000 sign cycles via
+   bench_full_chain.c + run_bench.sh; SUPERCOP / pq-crystals test_speed.c
+   shape):
+     NEON aarch64: logn=9 −0.94%, logn=10 −0.59% — perf-neutral (both
+       inside bench noise).
+     Scalar (FNDSA_NEON=0, FNDSA_SSE2=0, FNDSA_RV64D=0): logn=9 −8.49%,
+       logn=10 −9.53% — real speedup. NOTE: host L1d still active;
+       Cortex-M3 has no D-cache, so NOT a faithful ST33K1M5 proxy. On
+       M3-class hardware Layer 3's extra ~11n FP ops plus the flash
+       reads of B (b00..b11) may produce a small slowdown instead.
 
    Cost:
-     - Provisioning latency at key load (~0.5-2 s on ST33K1M5)
+     - Provisioning latency at key load.
      - 32n bytes of caller-supplied persistent storage (typically flash)
-     - API change (additive: new fndsa_*_with_basis_*() function family;
+     - API change (a new fndsa_*_with_basis_*() function family;
        existing fndsa_sign*() unchanged)
 
-   For deployment on Ledger / ST33K1M5 with basis stored in app NVRAM:
-   the basis lives in the SE's tamper-resistant flash, the caller uses
-   the atomic-flag-page protocol (fndsa_basis_is_valid + fndsa_setup_basis)
-   for tear-resistance against power loss mid-write.
+   For deployment on Ledger / ST33K1M5: the basis lives in the app's
+   NVRAM-backed flash. The library only writes basis bytes via
+   fndsa_compute_basis(); tear-resistance is the caller's responsibility.
+   Recommended pattern: reserve a small "valid" flag region (1 flash
+   word, atomic at the hardware level) separate from the basis data;
+   write the basis with fndsa_compute_basis(); only after the basis
+   write completes, set the valid flag. On the signing path, check the
+   flag before passing the basis pointer to fndsa_sign_*_with_basis_temp();
+   if the flag is invalid (e.g., from a power loss mid-write), fall
+   back to fndsa_sign*_temp() which recomputes the basis from sk per
+   signature.
 
-   To enable: -DFNDSA_PATH_B=1 -DFNDSA_PHASE1_REDUCED=1 at compile time. */
-#ifndef FNDSA_PHASE1_REDUCED
-#define FNDSA_PHASE1_REDUCED   0
-#endif
-#if FNDSA_PHASE1_REDUCED && !FNDSA_PATH_B
-#error FNDSA_PHASE1_REDUCED requires FNDSA_PATH_B
-#endif
-
-/* If FNDSA_FFSAMP_5N_REDUCED is 1, the outer-level call of
-   ffsamp_fft_inner drops l10 from its persistent set across the right
-   recursion and recomputes it from external_basis post-recursion. This
-   shrinks the OUTER-level ffsamp peak from 5n FLR to 4n FLR, taking the
-   total signing tmp[] from 43n+31 to 35n+31 bytes — saves another 4 KiB
-   at FN-DSA-512 / 8 KiB at FN-DSA-1024 on top of FNDSA_PHASE1_REDUCED.
-
-   Inner recursion levels are unaffected (they have no external basis to
-   recompute from); they retain the standard 5n_{L−1} peak which is below
-   the outer 4n_L absolute peak.
-
-   The outer-level layout becomes:
-     qc(0..3)   c1                  (n FLR, persistent across right rec)
-     qc(4..5)   d00                 (½n FLR, persistent across right rec)
-     qc(6..)    callee tmp           — callee tmp moves down from qc(10) to qc(6)
-   Persistent_above shrinks from 2.5n (c1+l10+d00) to 1.5n (c1+d00).
-
-   Post-right-recursion, l10 is recomputed via:
-     g01 = b00·adj(b10) + b01·adj(b11)   (2 fpoly_mul + 1 fpoly_add)
-     l10 = g01 / d00                      (1 fpoly_div_selfadj)
-   ~11n real FP ops per signing. Bench-measured 0.18% on NEON host;
-   projected ~2% on M4-class scalar. Well under the 2% acceptability
-   threshold for SE deployment.
-
-   Implies FNDSA_PHASE1_REDUCED (uses external_basis at outer level).
-
-   To enable: -DFNDSA_PATH_B=1 -DFNDSA_PHASE1_REDUCED=1
-              -DFNDSA_FFSAMP_5N_REDUCED=1 at compile time. */
-#ifndef FNDSA_FFSAMP_5N_REDUCED
-#define FNDSA_FFSAMP_5N_REDUCED   0
-#endif
-#if FNDSA_FFSAMP_5N_REDUCED && !FNDSA_PHASE1_REDUCED
-#error FNDSA_FFSAMP_5N_REDUCED requires FNDSA_PHASE1_REDUCED
+   To enable: -DFNDSA_LOW_RAM=1 at compile time. */
+#ifndef FNDSA_LOW_RAM
+#define FNDSA_LOW_RAM   0
 #endif
 
 /* Automatically recognize some architectures as being "64-bit", which

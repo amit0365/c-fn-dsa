@@ -229,35 +229,45 @@ size_t fndsa_sign_seeded(const void *sign_key, size_t sign_key_len,
  * systems that have only small stacks. Temporary area sizes are as
  * follows:
  *
- *    logn   min tmp_len   security                   [PATH_B]   [PATH_B+basis]   [+FFSAMP_5N]
- *   ------------------------------------------------------------------------------------------
- *      9      30239       standard (level I)            26143       22047            18975
- *     10      60447       standard (level V)            52255       44063            37919
+ *    logn   baseline tmp_len   FNDSA_LOW_RAM tmp_len   security
+ *   --------------------------------------------------------------------
+ *      9       30239              26143                standard (level I)
+ *     10       60447              52255                standard (level V)
  *
- *      2        267       none                          (n/a)       (n/a)            (n/a)
- *      3        503       none                            415       (n/a)            (n/a)
- *      4        975       none                            847       (n/a)            (n/a)
- *      5       1919       none                           1663       (n/a)            (n/a)
- *      6       3807       none                           3295       (n/a)            (n/a)
- *      7       7583       very weak                      6559       (n/a)            (n/a)
- *      8      15135       presumed weak                 13087       (n/a)            (n/a)
+ *      2         267                235                none
+ *      3         503                439                none
+ *      4         975                847                none
+ *      5        1919               1663                none
+ *      6        3807               3295                none
+ *      7        7583               6559                very weak
+ *      8       15135              13087                presumed weak
  *
- * Formulas (n = 2^logn):
- *   Default                                 : 59n+31 bytes
- *   With FNDSA_PATH_B                       : 51n+31 bytes  (saves 8n bytes/sign)
- *   With FNDSA_PATH_B + precomputed basis   : 43n+31 bytes  (saves 16n bytes/sign,
- *                                                            uses fndsa_*_with_basis_temp)
- *   With FNDSA_PATH_B + basis + FFSAMP_5N   : 37n+31 bytes  (saves 22n bytes/sign;
- *                                                            ffsamp outer peak 4n FLR
- *                                                            via Path A l10 recompute)
+ * (For the with-basis variant fndsa_sign_with_basis_temp(), tmp[]
+ * shrinks further to 37n+31; see that function's documentation. The
+ * baseline column reproduces Pornin's main-branch tmp_len thresholds —
+ * historical staged-reduction numbers can be recovered from git if
+ * needed.)
  *
- * FNDSA_PATH_B notes:
- *   Uses the t0+t1*l10 absorption + tight 24-quarter ffsamp layout.
- *   Bit-exact KAT compatibility at logn>=3, ~1-2% perf overhead.
- *   logn=2 not supported (FP edge case at n=4 — FN-DSA does not define
- *   n=4 as a parameter set).
+ * Formulas (n = 2^logn) for fndsa_sign_seeded_temp() (no-basis API):
+ *   Default            : 59n+31 bytes
+ *   With FNDSA_LOW_RAM : 51n+31 bytes  (recursive-body restructure
+ *                                        + outer-level apply_basis reorder;
+ *                                        saves 8n bytes/sign even without
+ *                                        the precomputed-basis API)
  *
- * FNDSA_PATH_B + precomputed basis notes:
+ * For fndsa_sign_with_basis_temp() (precomputed-basis API, FNDSA_LOW_RAM
+ * only): tmp[] = 37n+31 bytes — saves 22n/sign vs baseline. Full
+ * reduction stack: t0+t1*l10 absorption + precomputed basis + l10
+ * recompute, taking outer ffsamp peak to 4n fpr. See that function's
+ * documentation.
+ *
+ * FNDSA_LOW_RAM notes:
+ *   Bit-exact KAT compatibility at every supported logn (2..10).
+ *   Requires caller-supplied precomputed basis via fndsa_compute_basis()
+ *   passed to fndsa_*_with_basis_temp(). See inner.h's FNDSA_LOW_RAM
+ *   block for the full design and measured per-arch performance.
+ *
+ * FNDSA_LOW_RAM + precomputed basis notes:
  *   The caller precomputes the lattice basis B once via fndsa_compute_basis()
  *   into a separate persistent buffer (FNDSA_BASIS_SIZE(logn) = 32n bytes;
  *   on Ledger / SE deployment this lives in NV flash as an N_-prefixed global).
@@ -285,16 +295,16 @@ size_t fndsa_sign_seeded_temp(const void *sign_key, size_t sign_key_len,
 	void *tmp, size_t tmp_len);
 
 /*
- * Phase 1 reduction (FNDSA_PHASE1_REDUCED only): precomputed-basis API.
+ * Basis-and-Gram setup reduction (FNDSA_LOW_RAM only): precomputed-basis API.
  *
  * Available only when the library is compiled with both
- * -DFNDSA_PATH_B=1 -DFNDSA_PHASE1_REDUCED=1. The caller precomputes
+ * -DFNDSA_LOW_RAM=1. The caller precomputes
  * the lattice basis B = [[g, -f], [G, -F]] in FFT representation once
  * at key load via fndsa_compute_basis(), stores it in a caller-managed
  * buffer (typically persistent flash on Ledger via N_-prefixed globals),
  * and signs via fndsa_sign_*_with_basis_temp() variants. This reduces
  * sign tmp[] from 51*n+31 to ~45*n+31 bytes (saves another 3 KiB at
- * FN-DSA-512 / 6 KiB at FN-DSA-1024 on top of FNDSA_PATH_B's 4/8 KiB).
+ * FN-DSA-512 / 6 KiB at FN-DSA-1024 on top of FNDSA_LOW_RAM's 4/8 KiB).
  *
  * Basis buffer size: FNDSA_BASIS_SIZE(logn) = 4 * (1<<logn) * 8 bytes
  *   = 32 * (1<<logn) bytes
@@ -326,7 +336,7 @@ int fndsa_compute_basis(
 	void *basis_buf, size_t basis_buf_len);
 
 /* Sign with a precomputed basis. tmp_len must be at least 45*n+31 bytes
- * (down from 59*n+31 baseline / 51*n+31 with FNDSA_PATH_B alone).
+ * (down from 59*n+31 baseline / 51*n+31 with FNDSA_LOW_RAM alone).
  * basis must point to a valid basis previously computed by
  * fndsa_compute_basis() from the same sign_key. Behavior is undefined
  * if basis was computed from a different key. */

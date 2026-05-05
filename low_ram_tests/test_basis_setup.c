@@ -1,6 +1,6 @@
-/* Day 6 paint-and-check test for FNDSA_PHASE1_REDUCED.
+/* Day 6 paint-and-check test for FNDSA_LOW_RAM.
  *
- * Strategy: allocate tmp[] at the LARGER PATH_B size (51n+31 bytes), paint
+ * Strategy: allocate tmp[] at the LARGER the recursive body size (51n+31 bytes), paint
  * the bytes [43n, 51n+31) — which phase-1-reduced signing claims it does
  * not need — with a sentinel pattern, then run a full signing round via
  * the public _with_basis API. After the call, verify the painted region
@@ -17,9 +17,9 @@
  * the public-API / sign_core level.
  *
  * Build:
- *   clang -DFNDSA_PATH_B=1 -DFNDSA_PHASE1_REDUCED=1 -O2 -c \
- *     test_phase1.c -o test_phase1.o
- *   clang -o test_phase1 test_phase1.o codec.o mq.o sha3.o sysrng.o util.o \
+ *   clang -DFNDSA_LOW_RAM=1 -DFNDSA_LOW_RAM=1 -O2 -c \
+ *     test_basis_setup.c -o test_basis_setup.o
+ *   clang -o test_basis_setup test_basis_setup.o codec.o mq.o sha3.o sysrng.o util.o \
  *     kgen.o kgen_fxp.o kgen_gauss.o kgen_mp31.o kgen_ntru.o kgen_poly.o \
  *     kgen_zint31.o sign.o sign_core.o sign_fpoly.o sign_fpr.o \
  *     sign_sampler.o vrfy.o -lm
@@ -30,10 +30,10 @@
 #include <string.h>
 #include <stdint.h>
 
-#include "fndsa.h"
+#include "../fndsa.h"
 
 /* Sentinel byte. Any non-zero value works; choosing one that's
-   unlikely to appear in legitimate FLR/integer data makes accidental
+   unlikely to appear in legitimate fpr/integer data makes accidental
    hits less likely. */
 #define SENTINEL_BYTE  0xA5
 
@@ -45,7 +45,7 @@ test_at_logn(unsigned logn)
 	size_t sig_len_max = FNDSA_SIGNATURE_SIZE(logn);
 	size_t basis_len = FNDSA_BASIS_SIZE(logn);
 
-	/* Allocate tmp[] at the PATH_B size (51n+31), but pass the smaller
+	/* Allocate tmp[] at the recursive body size (51n+31), but pass the smaller
 	   43n+31 to the API. The API is only documented to need 43n+31, so
 	   any writes beyond that are violations of the layout contract. */
 	size_t large_tmp_len = ((size_t)51 << logn) + 31;
@@ -74,7 +74,7 @@ test_at_logn(unsigned logn)
 
 	/* Paint the entire tmp[] with sentinel first, then let the signing
 	   call overwrite the [0, 43n+31) region. The bytes at [43n, 51n+31)
-	   should remain at SENTINEL_BYTE if phase 1 reduced signing respects
+	   should remain at SENTINEL_BYTE if basis-precomputed signing respects
 	   its 43n+31 layout claim. */
 	memset(tmp, SENTINEL_BYTE, large_tmp_len);
 
@@ -139,8 +139,8 @@ test_at_logn(unsigned logn)
 
 int main(void)
 {
-	printf("=== FNDSA_PHASE1_REDUCED paint-and-check (Day 6) ===\n");
-	printf("Allocates tmp[] at 51n+31 bytes (PATH_B size), passes 43n+31 to\n");
+	printf("=== FNDSA_LOW_RAM paint-and-check (Day 6) ===\n");
+	printf("Allocates tmp[] at 51n+31 bytes (the recursive body size), passes 43n+31 to\n");
 	printf("the with-basis API, paints bytes [43n, 51n+31) with sentinel,\n");
 	printf("and verifies sentinel is intact post-sign. Catches in-buffer\n");
 	printf("layout violations that ASAN can't see.\n\n");
@@ -152,7 +152,7 @@ int main(void)
 
 	printf("\n");
 	if (failures == 0) {
-		printf("ALL TESTS PASSED — phase 1 reduction respects its 43n+31 layout\n");
+		printf("ALL TESTS PASSED — basis-and-Gram setup reduction respects its 43n+31 layout\n");
 		return 0;
 	}
 	fprintf(stderr, "FAILURES: %d test case(s)\n", failures);

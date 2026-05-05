@@ -22,7 +22,7 @@ typedef struct {
 typedef struct {
 	chacha20rng_context pc;
 	unsigned logn;
-#if FNDSA_FFSAMP_5N_REDUCED
+#if FNDSA_LOW_RAM
 	const fpr *external_basis;
 #endif
 } chacha20_sampler_state;
@@ -688,7 +688,7 @@ test_sign_core(void)
 		// KAT_512_f, KAT_512_g, KAT_512_F, KAT_512_G,
 		hashed_vk, NULL, 0, "\xFF", (const uint8_t *)"data1", 5,
 		KAT_512_RND, sizeof KAT_512_RND, sig, tmp
-#if FNDSA_PHASE1_REDUCED
+#if FNDSA_LOW_RAM
 		, NULL  /* compute basis internally */
 #endif
 		);

@@ -73,15 +73,25 @@ OBJ_SIGN = sign.o sign_core.o sign_fpoly.o sign_fpr.o sign_sampler.o
 OBJ_VRFY = vrfy.o
 OBJ = $(OBJ_COMM) $(OBJ_KGEN) $(OBJ_SIGN) $(OBJ_VRFY)
 TESTOBJ = test_fndsa.o test_sampler.o test_sign.o
+STRESSOBJ = test_kat_stress.o
 SPEEDOBJ = speed_fndsa.o
 
-all: test_fndsa speed_fndsa
+all: test_fndsa test_kat_stress speed_fndsa
 
 clean:
-	-rm -f $(OBJ) $(TESTOBJ) $(SPEEDOBJ) test_fndsa speed_fndsa
+	-rm -f $(OBJ) $(TESTOBJ) $(STRESSOBJ) $(SPEEDOBJ) \
+		test_fndsa test_kat_stress speed_fndsa
 
 test_fndsa: $(OBJ) $(TESTOBJ)
 	$(LD) $(LDFLAGS) -o test_fndsa $(OBJ) $(TESTOBJ) $(LIBS)
+
+test_kat_stress: $(OBJ) $(STRESSOBJ)
+	$(LD) $(LDFLAGS) -o test_kat_stress $(OBJ) $(STRESSOBJ) $(LIBS)
+
+# Quick stress run (~1-2 min on a laptop). Override iteration counts via
+# STRESS_ARGS, e.g.: make stress STRESS_ARGS="2000 200 50".
+stress: test_kat_stress
+	./test_kat_stress $(STRESS_ARGS)
 
 speed_fndsa: $(OBJ) $(SPEEDOBJ)
 	$(LD) $(LDFLAGS) -o speed_fndsa $(OBJ) $(SPEEDOBJ) $(LIBS)
@@ -151,5 +161,49 @@ test_sampler.o: test_sampler.c sign_sampler.c fndsa.h sign_inner.h inner.h
 test_sign.o: test_sign.c sign_sampler.c sign_core.c fndsa.h sign_inner.h inner.h
 	$(CC) $(CFLAGS) -c -o test_sign.o test_sign.c
 
+test_kat_stress.o: test_kat_stress.c fndsa.h inner.h
+	$(CC) $(CFLAGS) -c -o test_kat_stress.o test_kat_stress.c
+
 speed_fndsa.o: speed_fndsa.c fndsa.h inner.h
 	$(CC) $(CFLAGS) -c -o speed_fndsa.o speed_fndsa.c
+
+# -----------------------------------------------------------------------
+# Low-RAM branch ad-hoc tests
+#
+# Sources live in low_ram_tests/, binaries land in low_ram_tests/bin/.
+# To add a new test, drop test_<name>.c into low_ram_tests/ and add <name>
+# to one of the lists below:
+#   LOW_RAM_TESTS         - normal link against $(OBJ)
+#   LOW_RAM_TESTS_INLINE  - test #include's "../sign_sampler.c" directly,
+#                           so sign_sampler.o must NOT be linked (would
+#                           cause duplicate-symbol errors).
+#
+# Build all:    make low-ram-tests
+# Build one:    make low_ram_tests/bin/test_path_b
+# Clean:        make clean-low-ram
+
+LOW_RAM_BIN = low_ram_tests/bin
+LOW_RAM_TESTS = test_basis_setup test_basis_setup_api test_basis_setup_primitives \
+                test_basis_setup_signing test_ffsamp_5n test_sampler_trace
+LOW_RAM_TESTS_INLINE = test_path_b test_path_b_peak test_ffsamp_5n_peak
+OBJ_NO_SAMPLER = $(filter-out sign_sampler.o,$(OBJ))
+
+low-ram-tests: \
+    $(LOW_RAM_TESTS:%=$(LOW_RAM_BIN)/%) \
+    $(LOW_RAM_TESTS_INLINE:%=$(LOW_RAM_BIN)/%)
+
+clean-low-ram:
+	-rm -rf $(LOW_RAM_BIN)
+
+.PHONY: low-ram-tests clean-low-ram
+
+$(LOW_RAM_BIN):
+	mkdir -p $(LOW_RAM_BIN)
+
+# Standard low-RAM tests: full $(OBJ) link.
+$(LOW_RAM_TESTS:%=$(LOW_RAM_BIN)/%): $(LOW_RAM_BIN)/%: low_ram_tests/%.c $(OBJ) | $(LOW_RAM_BIN)
+	$(LD) $(CFLAGS) $(LDFLAGS) -o $@ $< $(OBJ) $(LIBS)
+
+# Inline-include tests: drop sign_sampler.o; the .c is pulled in via #include.
+$(LOW_RAM_TESTS_INLINE:%=$(LOW_RAM_BIN)/%): $(LOW_RAM_BIN)/%: low_ram_tests/%.c $(OBJ_NO_SAMPLER) sign_sampler.c | $(LOW_RAM_BIN)
+	$(LD) $(CFLAGS) $(LDFLAGS) -o $@ $< $(OBJ_NO_SAMPLER) $(LIBS)

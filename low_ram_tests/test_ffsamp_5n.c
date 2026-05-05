@@ -1,24 +1,24 @@
-/* Path A (FNDSA_FFSAMP_5N_REDUCED) paint-and-check test.
+/* the outer-level body (FNDSA_LOW_RAM) paint-and-check test.
  *
  * Build:
- *   clang -DFNDSA_PATH_B=1 -DFNDSA_PHASE1_REDUCED=1 -DFNDSA_FFSAMP_5N_REDUCED=1 \
+ *   clang -DFNDSA_LOW_RAM=1 -DFNDSA_LOW_RAM=1 -DFNDSA_LOW_RAM=1 \
  *     -O2 -c test_ffsamp_5n.c -o test_ffsamp_5n.o
  *   clang -o test_ffsamp_5n test_ffsamp_5n.o codec.o mq.o sha3.o sysrng.o util.o \
  *     kgen.o kgen_fxp.o kgen_gauss.o kgen_mp31.o kgen_ntru.o kgen_poly.o \
  *     kgen_zint31.o sign.o sign_core.o sign_fpoly.o sign_fpr.o sign_sampler.o \
  *     vrfy.o -lm
  *
- * Strategy: allocate tmp[] at the LARGER PATH_B-only size (51n+31 bytes), paint
- * the bytes [37n, 51n+31) — which Path A's 4n FLR peak claim says it does not
+ * Strategy: allocate tmp[] at the LARGER the recursive body-only size (51n+31 bytes), paint
+ * the bytes [37n, 51n+31) — which the outer-level body's 4n fpr peak claim says it does not
  * need — with a sentinel pattern, then run a full signing round via the public
  * fndsa_sign_seeded_with_basis_temp API, passing 37n+31 as tmp_len. After the
  * call, verify the painted region is byte-identical to the sentinel.
  *
- * Path A's outer-level body uses fpoly_muladd_fft (per-coefficient complex
+ * the outer-level body's outer-level body uses fpoly_muladd_fft (per-coefficient complex
  * multiply-accumulate) in step 2 to compute c1 += t1·l10 in place at qc(0..3),
  * eliminating the qc(16..19) t1*l10 product slot that the un-fused chain
- * needed. This is what brings the function-internal peak from 5n FLR to 4n
- * FLR. The 37n+31 boundary = 4n FLR ffsamp + 2n bytes FP-stays-extra +
+ * needed. This is what brings the per-frame peak from 5n fpr to 4n
+ * fpr. The 37n+31 boundary = 4n fpr ffsamp + 2n bytes FP-stays-extra +
  * 2n bytes hm + n bytes G + 31. */
 
 #include <stdio.h>
@@ -26,7 +26,7 @@
 #include <string.h>
 #include <stdint.h>
 
-#include "fndsa.h"
+#include "../fndsa.h"
 
 #define SENTINEL_BYTE  0xA5
 
@@ -38,10 +38,10 @@ test_at_logn(unsigned logn)
 	size_t sig_len_max = FNDSA_SIGNATURE_SIZE(logn);
 	size_t basis_len = FNDSA_BASIS_SIZE(logn);
 
-	/* Allocate at the PATH_B-only (no phase 1 reduction) size 51n+31,
+	/* Allocate at the recursive body-only (no basis-and-Gram setup reduction) size 51n+31,
 	   pass 37n+31 as the API tmp_len. The bytes [37n, 51n+31) should
 	   be untouched by the new outer-level body — that's the load-bearing
-	   correctness claim for Path A's 4n FLR peak. */
+	   correctness claim for the outer-level body's 4n fpr peak. */
 	size_t large_tmp_len = ((size_t)51 << logn) + 31;
 	size_t reduced_tmp_len = ((size_t)37 << logn) + 31;
 	size_t paint_offset = (size_t)37 << logn;
@@ -121,11 +121,11 @@ test_at_logn(unsigned logn)
 
 int main(void)
 {
-	printf("=== FNDSA_FFSAMP_5N_REDUCED paint-and-check (Day 3+4) ===\n");
-	printf("Verifies the new outer-level Path A body at the tightened\n");
-	printf("37n+31 byte tmp_len boundary. Path A uses fpoly_muladd_fft (Day 4)\n");
+	printf("=== FNDSA_LOW_RAM paint-and-check (Day 3+4) ===\n");
+	printf("Verifies the new outer-level the outer-level body body at the tightened\n");
+	printf("37n+31 byte tmp_len boundary. the outer-level body uses fpoly_muladd_fft (Day 4)\n");
 	printf("for in-place c1 = t0 + t1·l10, eliminating qc(16..19) scratch and\n");
-	printf("achieving 4n FLR ffsamp peak.\n\n");
+	printf("achieving 4n fpr ffsamp peak.\n\n");
 
 	int failures = 0;
 	for (unsigned logn = 9; logn <= 10; logn++) {
@@ -134,7 +134,7 @@ int main(void)
 
 	printf("\n");
 	if (failures == 0) {
-		printf("ALL TESTS PASSED — Path A respects 37n+31 boundary; new outer body\n");
+		printf("ALL TESTS PASSED — the outer-level body respects 37n+31 boundary; new outer body\n");
 		printf("produces verifying signatures at logn 9, 10\n");
 		return 0;
 	}

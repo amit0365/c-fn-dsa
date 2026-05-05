@@ -1,0 +1,30 @@
+# Object files
+*.o
+*.obj
+
+# Makefile targets
+/test_fndsa
+/speed_fndsa
+
+# Test binaries (built from Makefile-tracked test_*.c sources)
+/test_kat_stress
+/test_kat_stress.neon
+
+# Low-RAM branch ad-hoc test binaries (sources in low_ram_tests/, build into bin/)
+/low_ram_tests/bin/
+
+# Trace / profiling build artifacts
+/trace_build/
+
+# Bench binaries (built from bench_*.c sources)
+/bench_baseline
+/bench_full_chain
+/bench_pathb
+/bench_phase1
+/bench_recompute
+
+# Executables on Windows
+*.exe
+
+# Editor / tooling
+.claude/

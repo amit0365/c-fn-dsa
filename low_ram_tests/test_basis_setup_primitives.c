@@ -1,4 +1,4 @@
-/* Correctness test for the FNDSA_PHASE1_REDUCED primitives.
+/* Correctness test for the FNDSA_LOW_RAM primitives.
  *
  * fpoly_gram_fft_dst should produce mathematically identical output
  * to fpoly_gram_fft. This test verifies that for several logn values
@@ -9,9 +9,9 @@
  *   4. Comparing reference vs test outputs bit-exactly
  *
  * Build:
- *   clang -DFNDSA_PATH_B=1 -DFNDSA_PHASE1_REDUCED=1 -O2 \
- *     -c test_phase1_primitives.c -o test_phase1_primitives.o
- *   clang -o test_phase1_primitives test_phase1_primitives.o \
+ *   clang -DFNDSA_LOW_RAM=1 -DFNDSA_LOW_RAM=1 -O2 \
+ *     -c test_basis_setup_primitives.c -o test_basis_setup_primitives.o
+ *   clang -o test_basis_setup_primitives test_basis_setup_primitives.o \
  *     codec.o mq.o sha3.o sysrng.o util.o sign.o sign_core.o sign_fpoly.o \
  *     sign_fpr.o sign_sampler.o vrfy.o -lm
  */
@@ -21,12 +21,12 @@
 #include <string.h>
 #include <stdint.h>
 
-#include "sign_inner.h"
+#include "../sign_inner.h"
 
 #define MAX_LOGN  10
 
 /* Generate a deterministic pseudo-random basis (b00..b11) for testing.
-   Values are chosen to be in a reasonable FLR range: roughly [0.1, 10]
+   Values are chosen to be in a reasonable fpr range: roughly [0.1, 10]
    in absolute value, with mixed signs. */
 static void
 make_test_basis(unsigned logn, uint32_t seed, fpr *basis)
@@ -36,7 +36,7 @@ make_test_basis(unsigned logn, uint32_t seed, fpr *basis)
 	for (size_t i = 0; i < 4 * n; i++) {
 		state = state * 1664525u + 1013904223u;
 		uint32_t bits = state;
-		/* Map to a small FLR value. We use the FPR macro convention:
+		/* Map to a small fpr value. We use the FPR macro convention:
 		   FPR(mantissa, exponent) = mantissa * 2^exponent.
 		   For variety, encode a number in [-8, 8) range.
 		   Mantissa in [2^52, 2^53-1], exponent in [-55, -50] */
@@ -72,15 +72,15 @@ test_one_logn(unsigned logn)
 	fpr *b11 = b10 + n;
 	fpoly_gram_fft(logn, b00, b01, b10, b11);
 	/* After this:
-	   b00 holds gram's g00 (full n FLR, but only first hn elements meaningful;
+	   b00 holds gram's g00 (full n fpr, but only first hn elements meaningful;
 	     second hn should be zero per fpoly_gram_fft's output semantics)
-	   b01 holds gram's g01 (full n FLR — re at b01[0..hn], im at b01[hn..n])
-	   b10 holds gram's g11 (full n FLR, only first hn meaningful) */
+	   b01 holds gram's g01 (full n fpr — re at b01[0..hn], im at b01[hn..n])
+	   b10 holds gram's g11 (full n fpr, only first hn meaningful) */
 
 	/* Test: fpoly_gram_fft_dst on basis_orig */
 	fpoly_gram_fft_dst(logn, g00_dst, g01_dst, g11_dst, basis_orig);
 
-	/* Compare. g00 and g11 from gram_fft are full n FLR but only the
+	/* Compare. g00 and g11 from gram_fft are full n fpr but only the
 	   first hn are meaningful. g00_dst and g11_dst are the compact half-size form. */
 	int errors = 0;
 

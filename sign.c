@@ -15,7 +15,7 @@ sign_step1(unsigned logn, const uint8_t *sign_key,
 	const char *id, const uint8_t *hv, size_t hv_len,
 	const uint8_t *seed, size_t seed_len,
 	uint8_t *sig, void *tmp
-#if FNDSA_PHASE1_REDUCED
+#if FNDSA_LOW_RAM
 	, const fpr *external_basis  /* NULL = compute internally */
 #endif
 	)
@@ -33,28 +33,16 @@ sign_step1(unsigned logn, const uint8_t *sign_key,
 	int8_t *g = f + n;
 	int8_t *F = g + n;
 	/* G's offset depends on the chosen tmp[] layout:
-	     baseline (59n+31):                58n bytes
-	     FNDSA_PATH_B (51n+31):            50n bytes
-	     FNDSA_PATH_B + basis (43n+31):    42n bytes  (phase 1 reduction;
-	                                                    ffsamp peak at 5n FLR
-	                                                    verified by test_path_b_peak)
-	     FNDSA_FFSAMP_5N + basis (35n+31): 34n bytes  (Path A: ffsamp outer
-	                                                    peak drops to 4n FLR
-	                                                    via l10 recompute) */
+	     baseline (59n+31):                       58n bytes
+	     FNDSA_LOW_RAM with basis (37n+31):       36n bytes
+	         (G placed after hm at 34n + 2n; ffsamp outer peak is
+	         4n fpr via fpoly_muladd_fft + l10 recompute.)
+	     FNDSA_LOW_RAM no-basis sign path:        50n bytes */
 	size_t G_offset_n;
-#if FNDSA_PHASE1_REDUCED
-	if (external_basis != NULL) {
-#if FNDSA_FFSAMP_5N_REDUCED
-		G_offset_n = 36;  /* Path A: G after hm (at 34n) + 2n */
+#if FNDSA_LOW_RAM
+	G_offset_n = (external_basis != NULL) ? 36 : 50;
 #else
-		G_offset_n = 42;
-#endif
-	} else
-#endif
-#if FNDSA_PATH_B
-	{ G_offset_n = 50; }
-#else
-	{ G_offset_n = 58; }
+	G_offset_n = 58;
 #endif
 	int8_t *G = (int8_t *)tmp + (G_offset_n << logn);
 
@@ -125,18 +113,17 @@ sign_step1(unsigned logn, const uint8_t *sign_key,
 	vrfy_key[0] = 0x00 + logn;
 	mqpoly_encode(logn, t0, vrfy_key + 1);
 
-	/* We can use t0 for the SHAKE256 context. The tmp buffer currently
-	   starts with t1 (2*n bytes), which contains the encoded public
-	   key (no more than 2*n bytes), leaging 56*n bytes until the
-	   storage place for G (at tmp + 58*n). With n >= 4, this is at
-	   least 224 bytes; the SHAKE context uses 208 bytes. Moreover,
-	   tmp + 2*n is at least 8-byte aligned. */
+	/* The shake_context (208 bytes) lives on the stack rather than in
+	   tmp[]. The earlier scheme placed it at t0 = tmp+2n bytes, which
+	   under FNDSA_LOW_RAM at logn=2 (G_offset = 50n = 200) overlapped G
+	   by 16 bytes (gap was 48n = 192 < 208), corrupting G before
+	   sign_core read it. */
 	uint8_t hashed_key[64];
-	shake_context *sc = (shake_context *)t0;
-	shake_init(sc, 256);
-	shake_inject(sc, vrfy_key, FNDSA_VRFY_KEY_SIZE(logn));
-	shake_flip(sc);
-	shake_extract(sc, hashed_key, sizeof hashed_key);
+	shake_context sc;
+	shake_init(&sc, 256);
+	shake_inject(&sc, vrfy_key, FNDSA_VRFY_KEY_SIZE(logn));
+	shake_flip(&sc);
+	shake_extract(&sc, hashed_key, sizeof hashed_key);
 
 	/* We now have G, and we checked that f, g and F can be decoded
 	   successfully (no out-of-range element). Hashed public key is in
@@ -144,7 +131,7 @@ sign_step1(unsigned logn, const uint8_t *sign_key,
 	return sign_core(logn, sign_key + 1, G, hashed_key,
 		ctx, ctx_len, id, hv, hv_len,
 		seed, seed_len, sig, tmp
-#if FNDSA_PHASE1_REDUCED
+#if FNDSA_LOW_RAM
 		, external_basis
 #endif
 		);
@@ -158,12 +145,12 @@ sign_step1(unsigned logn, const uint8_t *sign_key,
 
 /* Custom wrappers to allocate the temporary buffers on the stack. Several
    wrappers are defined so that stack allocation is not always worst-case. */
-#if FNDSA_PATH_B
+#if FNDSA_LOW_RAM
 #define SIGN_WRAP_TMP_FACTOR  51
 #else
 #define SIGN_WRAP_TMP_FACTOR  59
 #endif
-#if FNDSA_PHASE1_REDUCED
+#if FNDSA_LOW_RAM
 #define SIGN_STEP1_NO_BASIS_ARG  , NULL
 #else
 #define SIGN_STEP1_NO_BASIS_ARG
@@ -257,7 +244,7 @@ sign_wrapper(int weak,
 				seed, seed_len, sig);
 		}
 	} else {
-#if FNDSA_PATH_B
+#if FNDSA_LOW_RAM
 		if (tmp_len < (((size_t)51 << logn) + 31)) {
 			return 0;
 		}
@@ -377,9 +364,9 @@ fndsa_sign_weak_seeded_temp(const void *sign_key, size_t sign_key_len,
 		seed, seed_len, sig, max_sig_len, tmp, tmp_len);
 }
 
-#if FNDSA_PHASE1_REDUCED
+#if FNDSA_LOW_RAM
 /* ====================================================================
- * FNDSA_PHASE1_REDUCED: precomputed-basis API
+ * FNDSA_LOW_RAM: precomputed-basis API
  * ==================================================================== */
 
 /* see fndsa.h */
@@ -397,9 +384,6 @@ fndsa_compute_basis(
 	}
 	unsigned logn = head & 0x0F;
 	if (logn < 9 || logn > 10) {
-		/* Only secure variants (FN-DSA-512, FN-DSA-1024) supported by
-		   the precomputed-basis API. Weak variants should use the
-		   existing fndsa_*_weak API without precomputation. */
 		return 0;
 	}
 	size_t n = (size_t)1 << logn;
@@ -424,22 +408,30 @@ fndsa_compute_basis(
 	uint16_t *t0_buf = (uint16_t *)(G_buf + n);
 	uint16_t *t1_buf = t0_buf + n;
 
-	/* Decode key (mirrors sign_step1 but writes to scratch). */
+	/* Decode key. The gate above restricts logn to {9, 10}, so the
+	   switch only needs those two cases. */
 	unsigned nbits;
 	switch (logn) {
 	case 9: nbits = 6; break;
 	case 10: nbits = 5; break;
-	default: return 0;
+	default: return 0;  /* unreachable, defensive */
 	}
 	size_t flen = (nbits << logn) >> 3;
 	/* Expected sign_key layout: 1 byte header + flen + flen + n bytes. */
 	if (sign_key_len < (size_t)1 + flen + flen + n) {
 		return 0;
 	}
-	const uint8_t *enc = (const uint8_t *)sign_key + 1;
-	if (trim_i8_decode(logn, enc, f, nbits) == 0) return 0;
-	if (trim_i8_decode(logn, enc + flen, g, nbits) == 0) return 0;
-	if (trim_i8_decode(logn, enc + 2 * flen, F_buf, 8) == 0) return 0;
+
+	const uint8_t *sk_bytes = (const uint8_t *)sign_key;
+	size_t k, j = 1;
+	k = trim_i8_decode(logn, sk_bytes + j, f, nbits);
+	if (k == 0) return 0;
+	j += k;
+	k = trim_i8_decode(logn, sk_bytes + j, g, nbits);
+	if (k == 0) return 0;
+	j += k;
+	k = trim_i8_decode(logn, sk_bytes + j, F_buf, 8);
+	if (k == 0) return 0;
 
 	/* Recompute G via NTT (mirrors sign_step1's logic). */
 	mqpoly_small_to_int(logn, g, t0_buf);
@@ -480,7 +472,7 @@ fndsa_compute_basis(
 
 /* Internal helper: validates and dispatches to sign_step1 with the
    external basis. Mirrors sign_wrapper but for the precomputed-basis
-   variant; uses the smaller 45n+31 tmp_len threshold. */
+   variant; uses the 37n+31 tmp_len threshold. */
 static size_t
 sign_with_basis_wrapper(
 	const uint8_t *sign_key, size_t sign_key_len,
@@ -511,30 +503,16 @@ sign_with_basis_wrapper(
 	if (max_sig_len < FNDSA_SIGNATURE_SIZE(logn)) {
 		return 0;
 	}
-	/* The with-basis API contract: basis MUST be non-NULL. If it were
-	   NULL, sign_core would fall back to the no-external-basis path
-	   which uses a larger tmp[] layout (51n+31 bytes for hm+G); since
-	   our min_tmp check is sized for the with-basis path (37n+31 under
-	   FFSAMP_5N, 43n+31 otherwise), accepting NULL basis would produce
-	   a buffer overflow. Reject explicitly. */
-	if (basis == NULL) {
-		return 0;
-	}
-#if FNDSA_FFSAMP_5N_REDUCED
-	/* Path A min: 4n FLR (ffsamp peak) + post-ffsamp scratch + hm + G + 31.
-	   FP-stays post-ffsamp scratch ends at 34n bytes (w0+w1+f+g), then
-	   hm (2n) + G (n) + 31. Total = 37n+31. Scalar/integer builds end
-	   post-ffsamp at byte 26n so they could use 35n+31, but a single
-	   API minimum simplifies things — the 2n bytes/n unused on scalar
-	   builds is negligible (~1 KiB at logn=9). */
+	/* tmp[] layout under FNDSA_LOW_RAM: ffsamp outer peak (4n fpr) +
+	   FP-stays post-ffsamp scratch (ends at byte 34n: w0+w1+f+g) +
+	   hm (2n) + G (n) + 31 = 37n+31 bytes. The API minimum is
+	   pinned at 37n+31 across all builds (SIMD and scalar) so callers
+	   only need to remember one number. Scalar builds technically
+	   use slightly less post-ffsamp scratch but the difference is
+	   ~1 KiB at logn=9 — negligible. */
 	if (tmp == NULL || tmp_len < (((size_t)37 << logn) + 31)) {
 		return 0;
 	}
-#else
-	if (tmp == NULL || tmp_len < (((size_t)43 << logn) + 31)) {
-		return 0;
-	}
-#endif
 
 	return sign_step1(logn,
 		sign_key, ctx, ctx_len, id, hv, hv_len,
@@ -576,4 +554,4 @@ fndsa_sign_seeded_with_basis_temp(
 		seed, seed_len, sig, max_sig_len, tmp, tmp_len);
 }
 
-#endif /* FNDSA_PHASE1_REDUCED */
+#endif /* FNDSA_LOW_RAM */

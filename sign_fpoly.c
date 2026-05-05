@@ -1832,17 +1832,16 @@ fpoly_mul_fft(unsigned logn, fpr *a, const fpr *b)
 #endif
 }
 
-#if FNDSA_FFSAMP_5N_REDUCED
+#if FNDSA_LOW_RAM
 /* see sign_inner.h.
  *
- * Per-coefficient fused multiply-add (FMA, arithmetic — NOT a crypto
- * Message Authentication Code) in FFT representation:
+ * Per-coefficient fused multiply-add in FFT representation:
  *     c[k] = c[k] + a[k] · b[k]    (complex)
  *
  * In place at c; reads a and b non-destructively. No scratch beyond
  * registers — load a[k] and b[k] into registers, compute the product,
  * load c[k], add product, store back. Designed specifically to compute
- * c1 += t1·l10 within the 4n FLR boundary of Path A's outer body. */
+ * c1 += t1·l10 within the 4n fpr boundary of the outer-level body. */
 TARGET_SSE2 TARGET_NEON
 void
 fpoly_muladd_fft(unsigned logn, fpr *c, const fpr *a, const fpr *b)
@@ -1947,7 +1946,7 @@ fpoly_muladd_fft(unsigned logn, fpr *c, const fpr *a, const fpr *b)
 	}
 #endif
 }
-#endif /* FNDSA_FFSAMP_5N_REDUCED */
+#endif /* FNDSA_LOW_RAM */
 
 /* unused
 TARGET_SSE2 TARGET_NEON
@@ -2821,9 +2820,9 @@ fpoly_apply_basis(unsigned logn, fpr *t0, fpr *t1,
 	}
 #endif
 	fpoly_FFT(logn, t0);
-#if FNDSA_PATH_B
-	/* Path B: preserve b01 input so sign_core's reordered phase 1 can
-	   pass it to gram_fft AFTER apply_basis. Costs one extra n-FLR
+#if FNDSA_LOW_RAM
+	/* Preserve b01 input so sign_core's reordered basis-and-Gram setup 
+	   can pass it to gram_fft AFTER apply_basis. Costs one extra n-fpr
 	   memcpy (t1 := b01 first, then t1 *= t0) compared to the baseline
 	   which destroys b01 in place. The savings come from eliminating
 	   the t2 backup in sign_core that the baseline needs precisely
@@ -2840,7 +2839,7 @@ fpoly_apply_basis(unsigned logn, fpr *t0, fpr *t1,
 	fpoly_mulconst(logn, t0, INV_Q);
 }
 
-#if FNDSA_PATH_B
+#if FNDSA_LOW_RAM
 /* see sign_inner.h.
  *
  * Per outer-loop iteration on i in [0, qn):
@@ -3043,18 +3042,18 @@ fpoly_pathb_finalize(unsigned logn, fpr *c1, fpr *t1_slot,
 	}
 #endif
 }
-#endif /* FNDSA_PATH_B */
+#endif /* FNDSA_LOW_RAM */
 
-#if FNDSA_PHASE1_REDUCED
+#if FNDSA_LOW_RAM
 /* see sign_inner.h.
  *
  * Non-destructive variant of fpoly_gram_fft: reads basis from a read-only
  * external buffer and writes outputs to specified destinations. The
  * arithmetic is unchanged; only storage layout differs. g00 and g11 are
- * stored as n/2 FLR each (self-adjoint, real coefficients only); g01 is
- * full n FLR.
+ * stored as n/2 fpr each (self-adjoint, real coefficients only); g01 is
+ * full n fpr.
  *
- * This is the load-bearing primitive of phase 1 reduction: it allows
+ * This is the load-bearing primitive of basis-and-Gram setup reduction: it allows
  * gram to read from a flash-resident basis without copying the basis
  * into tmp[]. */
 TARGET_SSE2 TARGET_NEON
@@ -3191,25 +3190,25 @@ fpoly_gram_fft_dst(unsigned logn,
 }
 
 /* see sign_inner.h. Thin wrapper that extracts b01, b11 from the
-   external basis and calls into Path B's preserve-b01 apply_basis. */
+   external basis and calls into the preserve-b01 apply_basis. */
 void
 fpoly_apply_basis_external(unsigned logn, fpr *t0, fpr *t1,
 	const fpr *basis, const uint16_t *hm)
 {
 	size_t n = (size_t)1 << logn;
-	/* const-cast: under FNDSA_PATH_B (implied by FNDSA_PHASE1_REDUCED),
+	/* const-cast: under FNDSA_LOW_RAM,
 	   apply_basis preserves b01 — does not write to it. */
 	fpr *b01 = (fpr *)(basis + n);
 	fpr *b11 = (fpr *)(basis + 3 * n);
 	fpoly_apply_basis(logn, t0, t1, b01, b11, hm);
 }
-#endif /* FNDSA_PHASE1_REDUCED */
+#endif /* FNDSA_LOW_RAM */
 
-#if FNDSA_FFSAMP_5N_REDUCED
+#if FNDSA_LOW_RAM
 /* see sign_inner.h.
  *
  * Computes g01 = b00·adj(b10) + b01·adj(b11) where bXX are read from the
- * 4n-FLR external basis at offsets 0, n, 2n, 3n respectively.
+ * 4n-fpr external basis at offsets 0, n, 2n, 3n respectively.
  *
  * Per-coefficient formula (each k in [0, hn)):
  *   u = b00 · adj(b10):
@@ -3221,7 +3220,7 @@ fpoly_apply_basis_external(unsigned logn, fpr *t0, fpr *t1,
  *   dst[k]      = u_re + v_re
  *   dst[k + hn] = u_im + v_im
  *
- * Output is a full FFT-domain complex polynomial (n FLR). No scratch
+ * Output is a full FFT-domain complex polynomial (n fpr). No scratch
  * beyond dst. */
 TARGET_SSE2 TARGET_NEON
 void
@@ -3316,4 +3315,4 @@ fpoly_g01_fft_external(unsigned logn, fpr *dst, const fpr *basis)
 	}
 #endif
 }
-#endif /* FNDSA_FFSAMP_5N_REDUCED */
+#endif /* FNDSA_LOW_RAM */

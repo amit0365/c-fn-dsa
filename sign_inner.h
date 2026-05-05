@@ -539,11 +539,13 @@ void fpoly_mul_fft(unsigned logn, fpr *a, const fpr *b);
  *     c_re[k] = c_re[k] + (a_re[k]·b_re[k] − a_im[k]·b_im[k])
  *     c_im[k] = c_im[k] + (a_re[k]·b_im[k] + a_im[k]·b_re[k])
  *
- * Required by Path A's outer-level body (FNDSA_FFSAMP_5N_REDUCED) to
- * compute c1 = t0 + t1·l10 in place at t0 with NO scratch beyond
- * registers. Eliminates the qc(16..19) scratch usage that would
- * otherwise blow past the function's 4n FLR peak boundary. */
-#if FNDSA_FFSAMP_5N_REDUCED
+ * Required by the outermost ffsamp_fft_inner call under FNDSA_LOW_RAM
+ * (the only level that has access to a flash-resident basis and that
+ * runs the L10-recompute optimization). It computes c1 = t0 + t1·l10
+ * in place at t0 with NO scratch beyond CPU registers, eliminating
+ * the qc(16..19) scratch buffer that the mul-then-add chain
+ * would need */
+#if FNDSA_LOW_RAM
 #define fpoly_muladd_fft   fndsa_fpoly_muladd_fft
 void fpoly_muladd_fft(unsigned logn, fpr *c, const fpr *a, const fpr *b);
 #endif
@@ -616,8 +618,8 @@ void fpoly_gram_fft(unsigned logn,
 void fpoly_apply_basis(unsigned logn, fpr *t0, fpr *t1,
 	fpr *b01, fpr *b11, const uint16_t *hm);
 
-#if FNDSA_PATH_B
-/* Path B fused finalize: computes
+#if FNDSA_LOW_RAM
+/* Recursive-body fused finalize: computes
  *   z1 = merge_fft(zlow, zhigh)        (FFT-domain merge of split form)
  *   c1 := c1 - z1 * l10                (in place; c1 becomes tb0)
  *   t1_slot := z1                      (in place; overwrites l10)
@@ -625,40 +627,40 @@ void fpoly_apply_basis(unsigned logn, fpr *t0, fpr *t1,
  * In a single fused loop (no scratch buffer materializing z1 or z1*l10).
  * This collapses sign_sampler.c step 9's chain of merge_fft + memcpy +
  * mul_fft + sub + memcpy into one pass, freeing scratch for tighter
- * recursive Path B layout.
+ * recursive body layout.
  *
  * Constraints:
  *   - logn >= 2 (called from ffsamp_fft_inner's recursive case).
- *   - t1_slot initially holds l10 (n FLR, full FFT). On exit holds z1.
- *   - c1 initially holds c1 = t0 + t1*l10 (n FLR). On exit holds tb0.
- *   - zlow and zhigh are n/2 FLR each (callee t0/t1 outputs in split form).
+ *   - t1_slot initially holds l10 (n fpr, full FFT). On exit holds z1.
+ *   - c1 initially holds c1 = t0 + t1*l10 (n fpr). On exit holds tb0.
+ *   - zlow and zhigh are n/2 fpr each (callee t0/t1 outputs in split form).
  *   - All four pointers must be pairwise disjoint. */
 #define fpoly_pathb_finalize   fndsa_fpoly_pathb_finalize
 void fpoly_pathb_finalize(unsigned logn, fpr *c1, fpr *t1_slot,
 	const fpr *zlow, const fpr *zhigh);
 #endif
 
-#if FNDSA_PHASE1_REDUCED
-/* Phase 1 reduction: compute Gram matrix from a read-only external basis
+#if FNDSA_LOW_RAM
+/* Basis-and-Gram setup reduction: compute Gram matrix from a read-only external basis
  * buffer, writing outputs to specified destination locations.
  *
  * Inputs:
- *   basis: 4n FLR pointing to b00, b01, b10, b11 contiguous (FFT format).
+ *   basis: 4n fpr pointing to b00, b01, b10, b11 contiguous (FFT format).
  *          Read-only; safe to live in flash / external buffer.
  * Outputs:
- *   g00: n/2 FLR (self-adjoint, real coefficients only)
- *   g01: n FLR (full)
- *   g11: n/2 FLR (self-adjoint)
+ *   g00: n/2 fpr (self-adjoint, real coefficients only)
+ *   g01: n fpr (full)
+ *   g11: n/2 fpr (self-adjoint)
  *
  * The output buffers may live anywhere not overlapping the input basis
  * or each other. Compared to fpoly_gram_fft (which is destructive on
- * the basis and writes full n FLR for all three outputs), this variant
+ * the basis and writes full n fpr for all three outputs), this variant
  * preserves the basis and writes the compact form directly. */
 #define fpoly_gram_fft_dst   fndsa_fpoly_gram_fft_dst
 void fpoly_gram_fft_dst(unsigned logn,
 	fpr *g00, fpr *g01, fpr *g11, const fpr *basis);
 
-/* Phase 1 reduction: apply the lattice basis to obtain the target vector
+/* Basis-and-Gram setup reduction: apply the lattice basis to obtain the target vector
  * [t0, t1] = (g*hm/q, G*hm/q), reading from the external read-only basis
  * buffer (same format as fpoly_gram_fft_dst). Writes to t0, t1 only.
  * b01 and b11 are read at offsets n and 3n into basis. */
@@ -667,19 +669,19 @@ void fpoly_apply_basis_external(unsigned logn, fpr *t0, fpr *t1,
 	const fpr *basis, const uint16_t *hm);
 #endif
 
-#if FNDSA_FFSAMP_5N_REDUCED
+#if FNDSA_LOW_RAM
 /* ffsamp 5n→4n reduction: compute only the off-diagonal gram entry g01
- * from an external basis. This is the load-bearing primitive of Path A:
+ * from an external basis. This is the load-bearing primitive of the outer-level body:
  * after the right recursion in ffsamp_fft_inner's outer-level body,
  * l10 has been dropped from tmp[]; we recompute it via g01 = b00·adj(b10)
  * + b01·adj(b11) (this primitive) followed by l10 = g01 / d00 (via
  * fpoly_LDL_fft on the recomputed g01 with d00 as g00 input).
  *
  * Inputs:
- *   basis: 4n FLR pointing to b00, b01, b10, b11 contiguous (FFT format).
+ *   basis: 4n fpr pointing to b00, b01, b10, b11 contiguous (FFT format).
  *          Read-only.
  * Output:
- *   dst: n FLR receiving g01 (full FFT-domain complex polynomial).
+ *   dst: n fpr receiving g01 (full FFT-domain complex polynomial).
  *
  * dst must not alias basis. The primitive is per-coefficient — no
  * scratch beyond dst. */
@@ -705,13 +707,13 @@ typedef struct {
 	shake_context pc;
 #endif
 	unsigned logn;
-#if FNDSA_FFSAMP_5N_REDUCED
+#if FNDSA_LOW_RAM
 	/* When non-NULL, the outer-level call of ffsamp_fft_inner drops l10
 	   from the persistent set across the right recursion and recomputes
-	   it from this basis (4n FLR, same format as fndsa_compute_basis
+	   it from this basis (4n fpr, same format as fndsa_compute_basis
 	   output). Set by sign_core only when external_basis was passed via
 	   the with_basis API; left NULL otherwise (in which case the
-	   standard PATH_B body runs even at the outer level). */
+	   standard the recursive body runs even at the outer level). */
 	const fpr *external_basis;
 #endif
 } sampler_state;
@@ -775,7 +777,7 @@ size_t sign_core(unsigned logn,
 	const uint8_t *hashed_vk, const uint8_t *ctx, size_t ctx_len,
 	const char *id, const uint8_t *hv, size_t hv_len,
 	const uint8_t *seed, size_t seed_len, uint8_t *sig, void *tmp
-#if FNDSA_PHASE1_REDUCED
+#if FNDSA_LOW_RAM
 	, const fpr *external_basis
 #endif
 	);

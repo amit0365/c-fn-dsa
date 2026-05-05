@@ -1,4 +1,4 @@
-/* End-to-end test for FNDSA_PHASE1_REDUCED's external_basis path.
+/* End-to-end test for FNDSA_LOW_RAM's external_basis path.
  *
  * Strategy:
  *   1. Generate a keypair via fndsa_keygen_seeded.
@@ -10,12 +10,12 @@
  * Optional bit-exact check: signatures from (2) and (4) should match
  * byte-for-byte, since the only difference is whether basis is read
  * from tmp[] (computed inline) or from external_basis. The arithmetic
- * is identical (verified by test_phase1_primitives.c).
+ * is identical (verified by test_basis_setup_primitives.c).
  *
  * Build:
- *   clang -DFNDSA_PATH_B=1 -DFNDSA_PHASE1_REDUCED=1 -O2 -c \
- *     test_phase1_signing.c -o test_phase1_signing.o
- *   clang -o test_phase1_signing test_phase1_signing.o codec.o mq.o sha3.o \
+ *   clang -DFNDSA_LOW_RAM=1 -DFNDSA_LOW_RAM=1 -O2 -c \
+ *     test_basis_setup_signing.c -o test_basis_setup_signing.o
+ *   clang -o test_basis_setup_signing test_basis_setup_signing.o codec.o mq.o sha3.o \
  *     sysrng.o util.o kgen.o kgen_fxp.o kgen_gauss.o kgen_mp31.o kgen_ntru.o \
  *     kgen_poly.o kgen_zint31.o sign.o sign_core.o sign_fpoly.o sign_fpr.o \
  *     sign_sampler.o vrfy.o -lm
@@ -26,8 +26,8 @@
 #include <string.h>
 #include <stdint.h>
 
-#include "fndsa.h"
-#include "sign_inner.h"
+#include "../fndsa.h"
+#include "../sign_inner.h"
 
 /* basis_to_FFT is static in sign_core.c; reproduce here for test. */
 static void
@@ -152,9 +152,9 @@ test_at_logn(unsigned logn)
 		free(vrfy_key);
 	}
 
-	/* Allocate tmp[] at the documented size for FNDSA_PATH_B (51n+31).
-	   Phase 1 is reduced inside sign_core but tmp[] sizing for direct
-	   sign_core calls is at the higher of phase 1 + ffsamp peaks; the
+	/* Allocate tmp[] at the documented size for FNDSA_LOW_RAM (51n+31).
+	   The basis-and-Gram setup is reduced inside sign_core but tmp[] sizing for direct
+	   sign_core calls is at the higher of basis-and-Gram setup + ffsamp peaks; the
 	   conservative path-b size of 51n+31 covers it. */
 	size_t tmp_len = ((size_t)51 << logn) + 31;
 	void *tmp = malloc(tmp_len);
@@ -207,7 +207,7 @@ cleanup:
 
 int main(void)
 {
-	printf("=== FNDSA_PHASE1_REDUCED end-to-end signing test ===\n");
+	printf("=== FNDSA_LOW_RAM end-to-end signing test ===\n");
 	printf("Verifies sign_core with external_basis produces valid signatures.\n\n");
 
 	int failures = 0;
@@ -217,7 +217,7 @@ int main(void)
 
 	printf("\n");
 	if (failures == 0) {
-		printf("ALL TESTS PASSED — phase 1 reduction sign path validated\n");
+		printf("ALL TESTS PASSED — basis-and-Gram setup reduction sign path validated\n");
 		return 0;
 	}
 	fprintf(stderr, "FAILURES: %d test case(s)\n", failures);

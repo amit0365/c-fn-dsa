@@ -9,9 +9,9 @@
  * comparison the upstream PR description needs.
  *
  * Configuration auto-selection at build time:
- *   FNDSA_PHASE1_REDUCED defined → use fndsa_sign_seeded_with_basis_temp
+ *   FNDSA_LOW_RAM defined → use fndsa_sign_seeded_with_basis_temp
  *                                   (the with-basis API; activates Path A
- *                                   if FNDSA_FFSAMP_5N_REDUCED also set)
+ *                                   if FNDSA_LOW_RAM also set)
  *   else                          → use fndsa_sign_seeded_temp (no-basis
  *                                   path; baseline or PATH_B alone) */
 
@@ -41,16 +41,16 @@ bench_at_logn(unsigned logn, int iters)
 	size_t vk_len = FNDSA_VRFY_KEY_SIZE(logn);
 	size_t sig_len_max = FNDSA_SIGNATURE_SIZE(logn);
 
-#if FNDSA_PHASE1_REDUCED
+#if FNDSA_LOW_RAM
 	size_t basis_len = FNDSA_BASIS_SIZE(logn);
 	void *basis = aligned_alloc(8, basis_len);
-#  if FNDSA_FFSAMP_5N_REDUCED
+#  if FNDSA_LOW_RAM
 	size_t tmp_len = ((size_t)37 << logn) + 31;
 #  else
 	size_t tmp_len = ((size_t)43 << logn) + 31;
 #  endif
 #else
-#  if FNDSA_PATH_B
+#  if FNDSA_LOW_RAM
 	size_t tmp_len = ((size_t)51 << logn) + 31;
 #  else
 	size_t tmp_len = ((size_t)59 << logn) + 31;
@@ -69,7 +69,7 @@ bench_at_logn(unsigned logn, int iters)
 	uint8_t kseed[8] = {0xCA, 0xFE, 0xBA, 0xBE, (uint8_t)logn, 0, 0, 0};
 	fndsa_keygen_seeded(logn, kseed, sizeof kseed, sk, vk);
 
-#if FNDSA_PHASE1_REDUCED
+#if FNDSA_LOW_RAM
 	if (!fndsa_compute_basis(sk, sk_len, basis, basis_len)) {
 		fprintf(stderr, "logn=%u: fndsa_compute_basis FAILED\n", logn);
 		return 1;
@@ -81,7 +81,7 @@ bench_at_logn(unsigned logn, int iters)
 	/* Warm-up: 5 signs to settle any first-time caching / branch prediction. */
 	for (int i = 0; i < 5; i++) {
 		mseed[4] = (uint8_t)i;
-#if FNDSA_PHASE1_REDUCED
+#if FNDSA_LOW_RAM
 		(void)fndsa_sign_seeded_with_basis_temp(
 			sk, sk_len, basis,
 			NULL, 0, FNDSA_HASH_ID_RAW, "msg", 3,
@@ -102,7 +102,7 @@ bench_at_logn(unsigned logn, int iters)
 	for (int i = 0; i < iters; i++) {
 		mseed[4] = (uint8_t)i;
 		mseed[5] = (uint8_t)(i >> 8);
-#if FNDSA_PHASE1_REDUCED
+#if FNDSA_LOW_RAM
 		size_t l = fndsa_sign_seeded_with_basis_temp(
 			sk, sk_len, basis,
 			NULL, 0, FNDSA_HASH_ID_RAW, "msg", 3,
@@ -128,7 +128,7 @@ bench_at_logn(unsigned logn, int iters)
 	printf("%u %.0f %d %zu\n", logn, ns_per_sign, iters, tmp_len);
 
 	free(tmp); free(sig); free(vk); free(sk);
-#if FNDSA_PHASE1_REDUCED
+#if FNDSA_LOW_RAM
 	free(basis);
 #endif
 	return 0;

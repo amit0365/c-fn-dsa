@@ -30,10 +30,10 @@ basis_to_FFT(unsigned logn,
 }
 
 /* see sign_inner.h.
-   FNDSA_PHASE1_REDUCED: when external_basis is non-NULL, sign_core uses
+   FNDSA_LOW_RAM: when external_basis is non-NULL, sign_core uses
    it as the precomputed basis (skips basis_to_FFT, gram_fft, and the
    compact rearrange — instead calls fpoly_apply_basis_external and
-   fpoly_gram_fft_dst directly). external_basis must point to 4n FLR
+   fpoly_gram_fft_dst directly). external_basis must point to 4n fpr
    of FFT-domain basis polynomials (b00, b01, b10, b11 contiguous). */
 TARGET_SSE2 TARGET_NEON
 size_t
@@ -42,7 +42,7 @@ sign_core(unsigned logn,
 	const uint8_t *hashed_vk, const uint8_t *ctx, size_t ctx_len,
 	const char *id, const uint8_t *hv, size_t hv_len,
 	const uint8_t *seed, size_t seed_len, uint8_t *sig, void *tmp
-#if FNDSA_PHASE1_REDUCED
+#if FNDSA_LOW_RAM
 	, const fpr *external_basis
 #endif
 	)
@@ -129,58 +129,37 @@ sign_core(unsigned logn,
 		} else if (orig_falcon && counter == 0 && seed_len == rndlen) {
 			memcpy(rndp, seed, rndlen);
 		} else {
-			/* We can use the tmp buffer for the SHAKE context.
-			   It even works at n = 4 (logn = 2) because there
-			   are 58*4 = 232 bytes free in tmp[] at this point,
-			   and we need only 208. */
-			shake_context *sc = (shake_context *)tmp;
-			shake_init(sc, 256);
-			shake_inject(sc, seed, seed_len);
+			/* The shake_context (208 bytes) lives on the stack
+			   rather than at tmp[0]. Earlier it was placed
+			   at tmp[0] but under FNDSA_LOW_RAM this no
+			   longer holds: total tmp[] at logn=2 is 37*4+31 =
+			   179 bytes — smaller than the SHAKE context itself,
+			   so reusing tmp[] is impossible at this size. The
+			   208 stack bytes are negligible at logn>=9 and unconditional */
+			shake_context sc;
+			shake_init(&sc, 256);
+			shake_inject(&sc, seed, seed_len);
 			uint8_t cbuf[4];
 			cbuf[0] = (uint8_t)counter;
 			cbuf[1] = (uint8_t)(counter >> 8);
 			cbuf[2] = (uint8_t)(counter >> 16);
 			cbuf[3] = (uint8_t)(counter >> 24);
-			shake_inject(sc, cbuf, 4);
-			shake_flip(sc);
-			shake_extract(sc, rndp, rndlen);
+			shake_inject(&sc, cbuf, 4);
+			shake_flip(&sc);
+			shake_extract(&sc, rndp, rndlen);
 		}
 
 		/* hm offset depends on tmp[] layout:
-		     baseline (59n+31):              56n bytes
-		     FNDSA_PATH_B (51n+31):          48n bytes (phase 1 binds at 6n)
-		     FNDSA_PATH_B + basis (43n+31):  40n bytes (phase 1 = 4n,
-		                                                ffsamp peak = 5n FLR
-		                                                empirically — see
-		                                                test_path_b_peak.c)
-		     FNDSA_FFSAMP_5N + basis (35n+31): 32n bytes (Path A: ffsamp
-		                                                  outer peak = 4n
-		                                                  FLR via l10
-		                                                  recompute) */
-#if FNDSA_PHASE1_REDUCED
-		/* hm offset:
-		     external_basis NULL:               48n bytes
-		     PATH_B + basis (43n+31):           40n bytes
-		     PATH_B + basis + FFSAMP_5N (37n+31): 34n bytes
-		           (Path A: ffsamp peak = 4n FLR at outer level via
-		           fpoly_muladd_fft fused primitive; FP-stays post-ffsamp
-		           scratch ends at byte 34n, so hm at 34n is the first
-		           safe slot. tmp_len = 37n+31 reserves 2 extra bytes
-		           per n above what scalar/integer post-ffsamp needs —
-		           acceptable for a single API min.) */
-		size_t hm_offset_n;
-		if (external_basis != NULL) {
-#if FNDSA_FFSAMP_5N_REDUCED
-			hm_offset_n = 34;
-#else
-			hm_offset_n = 40;
-#endif
-		} else {
-			hm_offset_n = 48;
-		}
+		     baseline (59n+31):                       56n bytes
+		     FNDSA_LOW_RAM with basis (37n+31):       34n bytes
+		         (ffsamp outer peak = 4n fpr via fpoly_muladd_fft
+		         fused primitive + l10 recompute; FP-stays post-ffsamp
+		         scratch ends at byte 34n, so hm at 34n is the first safe
+		         slot.)
+		     FNDSA_LOW_RAM no-basis sign path:        48n bytes */
+#if FNDSA_LOW_RAM
+		size_t hm_offset_n = (external_basis != NULL) ? 34 : 48;
 		uint16_t *hm = (uint16_t *)((uint8_t *)tmp + hm_offset_n * n);
-#elif FNDSA_PATH_B
-		uint16_t *hm = (uint16_t *)((uint8_t *)tmp + 48 * n);
 #else
 		uint16_t *hm = (uint16_t *)((uint8_t *)tmp + 56 * n);
 #endif
@@ -190,13 +169,13 @@ sign_core(unsigned logn,
 		/* Initialize a sampler state. */
 		sampler_state ss;
 		sampler_init(&ss, logn, subseed, 56);
-#if FNDSA_FFSAMP_5N_REDUCED
+#if FNDSA_LOW_RAM
 		/* Wire the precomputed basis through to ffsamp's outer level.
 		   When non-NULL, ffsamp_fft_inner's outer call drops l10 from
 		   its persistent set and recomputes it from this basis after
-		   the right recursion (saves 1n FLR at outer level). Inner
+		   the right recursion (saves 1n fpr at outer level). Inner
 		   recursive calls don't see this — they take the standard
-		   PATH_B body path. */
+		   the recursive body path. */
 		ss.external_basis = external_basis;
 #endif
 
@@ -222,17 +201,17 @@ sign_core(unsigned logn,
 		(void)trim_i8_decode(logn, sign_key_fgF + flen, g, nbits);
 		fpr *t0 = (fpr *)tmp;
 		fpr *t1 = t0 + n;
-#if FNDSA_PHASE1_REDUCED
-		/* Phase 1 reduction: when external_basis is provided, skip
+#if FNDSA_LOW_RAM
+		/* Basis-and-Gram setup reduction: when external_basis is provided, skip
 		   basis_to_FFT + gram_fft + compact rearrange. Read basis
 		   from caller's buffer (typically flash); write target vector
 		   and gram outputs directly to the compact tmp[] layout:
-		     qc(0..3)   t0  (target, n FLR)
-		     qc(4..7)   t1  (target, n FLR)
-		     qc(8..11)  g01 (n FLR)
-		     qc(12..13) g00 (n/2 FLR self-adjoint)
-		     qc(14..15) g11 (n/2 FLR self-adjoint)
-		   Phase 1 footprint: 4n FLR (down from 6n with FNDSA_PATH_B). */
+		     qc(0..3)   t0  (target, n fpr)
+		     qc(4..7)   t1  (target, n fpr)
+		     qc(8..11)  g01 (n fpr)
+		     qc(12..13) g00 (n/2 fpr self-adjoint)
+		     qc(14..15) g11 (n/2 fpr self-adjoint)
+		   footprint: 4n fpr (down from 6n with FNDSA_LOW_RAM). */
 		if (external_basis != NULL) {
 			fpr *g01 = t1 + n;          /* qc(8..11) */
 			fpr *g00 = g01 + n;         /* qc(12..13) */
@@ -240,7 +219,7 @@ sign_core(unsigned logn,
 			fpoly_apply_basis_external(logn, t0, t1,
 				external_basis, hm);
 			fpoly_gram_fft_dst(logn, g00, g01, g11, external_basis);
-			goto phase1_done;
+			goto basis_setup_done;
 		}
 #endif
 		basis_to_FFT(logn, f, g, F, G, t1 + n);
@@ -248,10 +227,10 @@ sign_core(unsigned logn,
 		fpr *b01 = b00 + n;
 		fpr *b10 = b01 + n;
 		fpr *b11 = b10 + n;
-#if FNDSA_PATH_B
-		/* Path B phase 1 reorder: apply_basis runs BEFORE gram_fft so
+#if FNDSA_LOW_RAM
+		/* Basis-and-Gram setup reorder: apply_basis runs BEFORE gram_fft so
 		   it can read the live b01 directly (rather than from a separate
-		   1n-FLR backup t2 that the baseline maintains). The modified
+		   1n-fpr backup t2 that the baseline maintains). The modified
 		   apply_basis (sign_fpoly.c) preserves b01 in this build, so
 		   gram_fft afterwards sees the original basis polynomials.
 		   The compact rearrange uses b11 as scratch instead of t1
@@ -296,8 +275,8 @@ sign_core(unsigned logn,
 		fpoly_apply_basis(logn, t0, t1, t2, b11, hm);
 #endif
 
-#if FNDSA_PHASE1_REDUCED
-phase1_done:;
+#if FNDSA_LOW_RAM
+basis_setup_done:;
 #endif
 		/* Current layout:
 		      t0  (n)

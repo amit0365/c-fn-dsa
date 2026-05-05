@@ -1,4 +1,4 @@
-/* End-to-end test for the FNDSA_PHASE1_REDUCED public API.
+/* End-to-end test for the FNDSA_LOW_RAM public API.
  *
  * Verifies:
  *   - fndsa_compute_basis() produces a basis usable by fndsa_sign_with_basis_temp()
@@ -7,9 +7,9 @@
  *   - bit-exact match with existing fndsa_sign_seeded path (sanity check)
  *
  * Build:
- *   clang -DFNDSA_PATH_B=1 -DFNDSA_PHASE1_REDUCED=1 -O2 -c \
- *     test_phase1_api.c -o test_phase1_api.o
- *   clang -o test_phase1_api test_phase1_api.o codec.o mq.o sha3.o sysrng.o \
+ *   clang -DFNDSA_LOW_RAM=1 -DFNDSA_LOW_RAM=1 -O2 -c \
+ *     test_basis_setup_api.c -o test_basis_setup_api.o
+ *   clang -o test_basis_setup_api test_basis_setup_api.o codec.o mq.o sha3.o sysrng.o \
  *     util.o kgen.o kgen_fxp.o kgen_gauss.o kgen_mp31.o kgen_ntru.o \
  *     kgen_poly.o kgen_zint31.o sign.o sign_core.o sign_fpoly.o sign_fpr.o \
  *     sign_sampler.o vrfy.o -lm
@@ -20,7 +20,7 @@
 #include <string.h>
 #include <stdint.h>
 
-#include "fndsa.h"
+#include "../fndsa.h"
 
 static int
 test_at_logn(unsigned logn)
@@ -111,7 +111,7 @@ test_at_logn(unsigned logn)
 	/* Test undersized tmp_len rejection. The actual API minimum depends
 	   on build flags: 37n+31 under FFSAMP_5N_REDUCED, 43n+31 otherwise.
 	   Send 1 byte below the actual minimum. */
-#ifdef FNDSA_FFSAMP_5N_REDUCED
+#ifdef FNDSA_LOW_RAM
 	size_t actual_min = ((size_t)37 << logn) + 31;
 #else
 	size_t actual_min = ((size_t)43 << logn) + 31;
@@ -133,7 +133,7 @@ test_at_logn(unsigned logn)
 	/* Test NULL basis rejection. With FFSAMP_5N enabled, the API min
 	   tmp_len = 37n+31 is sized for the with-basis path. If basis is
 	   NULL, sign_core would fall back to the no-basis layout (51n+31
-	   under PATH_B+PHASE1) and write past tmp[]'s end → buffer
+	   under the recursive body+PHASE1) and write past tmp[]'s end → buffer
 	   overflow. The wrapper must reject NULL basis explicitly. */
 	size_t ld = fndsa_sign_seeded_with_basis_temp(
 		sk, sk_len, NULL,  /* NULL basis */
@@ -156,7 +156,7 @@ test_at_logn(unsigned logn)
 
 int main(void)
 {
-	printf("=== FNDSA_PHASE1_REDUCED public API end-to-end test ===\n");
+	printf("=== FNDSA_LOW_RAM public API end-to-end test ===\n");
 	printf("Verifies fndsa_compute_basis + fndsa_sign_with_basis_temp\n");
 	printf("at the reduced 43n+31 byte tmp_len.\n\n");
 
@@ -167,7 +167,7 @@ int main(void)
 
 	printf("\n");
 	if (failures == 0) {
-		printf("ALL TESTS PASSED — phase 1 reduction public API validated\n");
+		printf("ALL TESTS PASSED — basis-and-Gram setup reduction public API validated\n");
 		return 0;
 	}
 	fprintf(stderr, "FAILURES: %d test case(s)\n", failures);

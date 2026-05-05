@@ -18,7 +18,7 @@ typedef struct {
 typedef struct {
 	test_rng_context pc;
 	unsigned logn;
-#if FNDSA_FFSAMP_5N_REDUCED
+#if FNDSA_LOW_RAM
 	const fpr *external_basis;
 #endif
 } test_sampler_state;
