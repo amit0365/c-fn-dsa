@@ -1,41 +1,41 @@
-/* bench_full_chain.c — measure end-to-end signing time under whichever
- * configuration this binary was built with. Prints one line per logn:
+/* bench_full_chain.c — end-to-end signing microbenchmark in the
+ * SUPERCOP / pq-crystals/dilithium test_speed.c shape: NTESTS individual
+ * cpucycles() snapshots around each sign call, reported as
  *
- *   <logn> <ns_per_sign> <iterations>
+ *   sign logn=N: median: <c>, average: <c>, min: <c>, max: <c> (UNIT, n=...)
+ *   tmp logn=N:  <bytes>
  *
- * Build/run all four configurations via run_bench.sh (companion script).
- *
- * Reports the WHOLE sign call (not just a sub-step) — the apples-to-apples
- * comparison the upstream PR description needs.
+ * Build/run all configurations via run_bench.sh.
  *
  * Configuration auto-selection at build time:
- *   FNDSA_LOW_RAM defined → use fndsa_sign_seeded_with_basis_temp
- *                                   (the with-basis API; activates Path A
- *                                   if FNDSA_LOW_RAM also set)
- *   else                          → use fndsa_sign_seeded_temp (no-basis
- *                                   path; baseline or PATH_B alone) */
+ *   FNDSA_LOW_RAM defined → fndsa_sign_seeded_with_basis_temp (with-basis API)
+ *   else                  → fndsa_sign_seeded_temp (baseline, no-basis API) */
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
-#include <time.h>
 
 #include "fndsa.h"
+#include "cpucycles.h"
+#include "speed_print.h"
 
-#define ITERS_LOGN_9   1000
-#define ITERS_LOGN_10   500
+/* Mirror inner.h's default so -Wundef is satisfied without exposing
+   inner.h to a benchmark TU. */
+#ifndef FNDSA_LOW_RAM
+#define FNDSA_LOW_RAM 0
+#endif
 
-static uint64_t
-ns_now(void)
-{
-	struct timespec ts;
-	clock_gettime(CLOCK_MONOTONIC, &ts);
-	return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
-}
+/* NTESTS matches the convention used in pq-crystals/dilithium and
+   pq-crystals/kyber's ref/test/test_speed.c. 10000 individual op timings
+   give a rock-solid median; outliers from OS preempts / DVFS / cache
+   effects sit in the right tail and don't move the middle. */
+#ifndef NTESTS
+#define NTESTS 10000
+#endif
 
 static int
-bench_at_logn(unsigned logn, int iters)
+bench_at_logn(unsigned logn)
 {
 	size_t sk_len = FNDSA_SIGN_KEY_SIZE(logn);
 	size_t vk_len = FNDSA_VRFY_KEY_SIZE(logn);
@@ -44,24 +44,17 @@ bench_at_logn(unsigned logn, int iters)
 #if FNDSA_LOW_RAM
 	size_t basis_len = FNDSA_BASIS_SIZE(logn);
 	void *basis = aligned_alloc(8, basis_len);
-#  if FNDSA_LOW_RAM
 	size_t tmp_len = ((size_t)37 << logn) + 31;
-#  else
-	size_t tmp_len = ((size_t)43 << logn) + 31;
-#  endif
 #else
-#  if FNDSA_LOW_RAM
-	size_t tmp_len = ((size_t)51 << logn) + 31;
-#  else
 	size_t tmp_len = ((size_t)59 << logn) + 31;
-#  endif
 #endif
 
 	uint8_t *sk = malloc(sk_len);
 	uint8_t *vk = malloc(vk_len);
 	uint8_t *sig = malloc(sig_len_max);
 	uint8_t *tmp = malloc(tmp_len);
-	if (!sk || !vk || !sig || !tmp) {
+	uint64_t *t = malloc((NTESTS + 1) * sizeof *t);
+	if (!sk || !vk || !sig || !tmp || !t) {
 		fprintf(stderr, "logn=%u: alloc failed\n", logn);
 		return 1;
 	}
@@ -78,7 +71,9 @@ bench_at_logn(unsigned logn, int iters)
 
 	uint8_t mseed[8] = {0xDE, 0xAD, 0xBE, 0xEF, 0, 0, 0, 0};
 
-	/* Warm-up: 5 signs to settle any first-time caching / branch prediction. */
+	/* Warm-up — settles caches, branch predictor, turbo state. Same
+	   convention as Dilithium / Kyber test_speed.c (a few "burn-in"
+	   iterations before the measured loop). */
 	for (int i = 0; i < 5; i++) {
 		mseed[4] = (uint8_t)i;
 #if FNDSA_LOW_RAM
@@ -98,10 +93,13 @@ bench_at_logn(unsigned logn, int iters)
 #endif
 	}
 
-	uint64_t t0 = ns_now();
-	for (int i = 0; i < iters; i++) {
+	/* Measurement loop: NTESTS+1 cpucycles() snapshots taken immediately
+	   before each op. Successive differences give NTESTS individual
+	   per-sign cycle counts. */
+	for (int i = 0; i < NTESTS; i++) {
 		mseed[4] = (uint8_t)i;
 		mseed[5] = (uint8_t)(i >> 8);
+		t[i] = cpucycles();
 #if FNDSA_LOW_RAM
 		size_t l = fndsa_sign_seeded_with_basis_temp(
 			sk, sk_len, basis,
@@ -122,12 +120,14 @@ bench_at_logn(unsigned logn, int iters)
 			return 1;
 		}
 	}
-	uint64_t t1 = ns_now();
+	t[NTESTS] = cpucycles();
 
-	double ns_per_sign = (double)(t1 - t0) / (double)iters;
-	printf("%u %.0f %d %zu\n", logn, ns_per_sign, iters, tmp_len);
+	char label[64];
+	snprintf(label, sizeof label, "sign logn=%u:", logn);
+	print_results(label, t, NTESTS + 1);
+	printf("tmp  logn=%u: %zu bytes\n", logn, tmp_len);
 
-	free(tmp); free(sig); free(vk); free(sk);
+	free(t); free(tmp); free(sig); free(vk); free(sk);
 #if FNDSA_LOW_RAM
 	free(basis);
 #endif
@@ -136,11 +136,17 @@ bench_at_logn(unsigned logn, int iters)
 
 int main(void)
 {
-	/* Output format: one line per logn, parsable by run_bench.sh:
-	     <logn> <ns_per_sign> <iters> <tmp_len>
-	   Example:  9 213487 1000 22047 */
+	/* Build flag → config string for log readability. */
+#if FNDSA_LOW_RAM
+	const char *cfg = "FNDSA_LOW_RAM=1 (with-basis API)";
+#else
+	const char *cfg = "baseline (no-basis API)";
+#endif
+	printf("# bench_full_chain  config=%s  NTESTS=%d  unit=%s\n",
+		cfg, NTESTS, CPUCYCLES_UNIT);
+
 	int failures = 0;
-	if (bench_at_logn(9,  ITERS_LOGN_9) != 0) failures++;
-	if (bench_at_logn(10, ITERS_LOGN_10) != 0) failures++;
+	if (bench_at_logn(9)  != 0) failures++;
+	if (bench_at_logn(10) != 0) failures++;
 	return failures;
 }

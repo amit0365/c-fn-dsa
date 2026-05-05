@@ -223,14 +223,13 @@ On boot, missing/invalid flag → re-derive basis from key.
 
 ## Correctness considerations beyond the stance
 
-29. **Does Donjon's KAT suite exercise logn=2 (n=4)?** PATH_B has a
-    known correctness regression at logn=2 (FP-order divergence
-    occasionally crosses an integer-rounding boundary in the Gaussian
-    sampler, producing different but verifiable signatures). FN-DSA
-    does not standardize n=4 so this is a spec gap, but if Donjon's
-    internal validation runs the toy parameters, the KAT mismatch
-    would surface there. We skip logn=2 in our test_fndsa under
-    PATH_B; confirm this is acceptable for Donjon's evaluation.
+29. **Does Donjon's KAT suite exercise logn=2 (n=4)?** No outstanding
+    issue: logn=2 was previously broken under FNDSA_LOW_RAM by a
+    tmp[] layout collision (the 208-byte vk-hash shake_context overlapped
+    G's storage at tmp+50n by 16 bytes, since 48n=192 for n=4). Both
+    shake_contexts are now stack-allocated; logn=2 KAT bytes match
+    baseline bit-for-bit and test_kat_stress at logn=2 passes 1000
+    seeds with identical fingerprints between baseline and LOW_RAM.
 
 30. **fndsa_sign_temp buffer-reuse pattern.** Path A's deployment
     math closes only if the Ethereum app uses fndsa_sign_temp() and
