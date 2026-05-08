@@ -1322,24 +1322,24 @@ ffsamp_fft_inner(sampler_state *ss, unsigned logn, fpr *tmp,
 	{
 		size_t hn = (size_t)1 << (logn - 1);
 
-		/* Outer-level tree node (level=logn, index=0), if used. */
-		const fpr *flash_l10 = NULL;
+		/* Outer-level tree node (level=logn, index=0), if used.
+		   B1: read directly from flash via tree_l10/tree_d00/tree_d11
+		   pointers; skip the memcpy into qc(8..15) that B0 used. */
+		const fpr *tree_l10 = NULL;
+		const fpr *tree_d00 = NULL;
+		const fpr *tree_d11 = NULL;
 		size_t full_words = (size_t)1 << logn;
-		size_t half_words = (size_t)1 << (logn - 1);
+		(void)full_words;
 		if (ss->external_tree != NULL) {
+			size_t half_words_tmp = (size_t)1 << (logn - 1);
 			size_t per_node =
 				((size_t)1 << (logn + 1)) * sizeof(fpr);
 			const fpr *node = (const fpr *)
 				(ss->external_tree + 0 * per_node);
-			flash_l10 = node;
-			/* Fill qc(8..15) with l10/d00/d11 from tree, matching
-			   the post-LDL state the on-the-fly path would have. */
-			memcpy(qc(8), node, full_words * sizeof(fpr));
-			memcpy(qc(12),
-				node + full_words, half_words * sizeof(fpr));
-			memcpy(qc(14),
-				node + full_words + half_words,
-				half_words * sizeof(fpr));
+			tree_l10 = node;
+			tree_d00 = node + full_words;
+			tree_d11 = node + full_words + half_words_tmp;
+			(void)half_words_tmp;
 		} else {
 			/* Decompose G into LDL; the decomposed matrix
 			   replaces G. After: qc(8..11)=l10, qc(12..13)=d00,
@@ -1349,23 +1349,40 @@ ffsamp_fft_inner(sampler_state *ss, unsigned logn, fpr *tmp,
 
 		/* LOW_RAM: c1 := t0 + t1*l10 via fpoly_muladd_fft (per-
 		   coefficient FMA in registers, no scratch buffer). */
-		fpoly_muladd_fft(logn, qc(0), qc(4), qc(8));
+		if (tree_l10 != NULL) {
+			fpoly_muladd_fft(logn, qc(0), qc(4), tree_l10);
+		} else {
+			fpoly_muladd_fft(logn, qc(0), qc(4), qc(8));
+		}
 
 		/* LOW_RAM: relocate t1 to qc(8..11) (overwrites now-stale
-		   l10 — l10 will be recomputed post-recursion from the
-		   external basis or re-read from tree), then split into
+		   l10 in the on-the-fly path; the slot is just unused
+		   working scratch in the tree path), then split into
 		   callee positions and relocate ce_t1 + d00 to fit the 4n
 		   layout. */
 		memcpy(qc(8), qc(4), sizeof(fpr) << logn);
 		fpoly_split_fft(logn, qc(6), qc(4), qc(8));
 		memcpy(qc(8), qc(4), sizeof(fpr) << (logn - 1));
-		memcpy(qc(4), qc(12), sizeof(fpr) << (logn - 1));
+		if (tree_d00 == NULL) {
+			/* On-the-fly path: move d00 from qc(12..13) to qc(4..5)
+			   so it survives the right recursion (which clobbers
+			   qc(12..13) for right_g00). Tree path skips this
+			   move and reads d00 from flash for the left split. */
+			memcpy(qc(4), qc(12),
+				sizeof(fpr) << (logn - 1));
+		}
 
 		/* Split d11 into the right sub-tree (split yields right_00
-		   and right_01, right_11 is a copy of right_00). LOW_RAM
-		   layout: f1 dst (qc(10..11)) and f src (qc(14..15)) are
-		   disjoint, so no save scratch needed. */
-		fpoly_split_selfadj_fft(logn, qc(12), qc(10), qc(14));
+		   and right_01, right_11 is a copy of right_00). Tree path
+		   reads d11 directly from flash; on-the-fly path uses
+		   qc(14..15). */
+		if (tree_d11 != NULL) {
+			fpoly_split_selfadj_fft(logn,
+				qc(12), qc(10), tree_d11);
+		} else {
+			fpoly_split_selfadj_fft(logn,
+				qc(12), qc(10), qc(14));
+		}
 		memcpy(qc(13), qc(12), sizeof(fpr) << (logn - 2));
 
 		/* First recursive call on the right sub-tree (callee tmp =
@@ -1373,13 +1390,12 @@ ffsamp_fft_inner(sampler_state *ss, unsigned logn, fpr *tmp,
 		   the standard recursive body. Right child's tree index is 0. */
 		ffsamp_fft_inner(ss, logn - 1, qc(6), 0);
 
-		/* Recompute / re-read l10 for the post-right finalize. With
-		   tree: memcpy from flash. Without tree: recompute g01 from
-		   external_basis (Layer 3), then derive l10 = g01 / d00 via
-		   fpoly_LDL_fft. */
-		if (flash_l10 != NULL) {
-			memcpy(qc(10), flash_l10, full_words * sizeof(fpr));
-		} else {
+		/* Recompute / re-read l10 for the post-right finalize.
+		   On-the-fly path: recompute g01 from external_basis
+		   (Layer 3), then derive l10 = g01 / d00 via fpoly_LDL_fft.
+		   Tree path: l10 stays in flash; we use the _external
+		   variant of pathb_finalize below. */
+		if (tree_l10 == NULL) {
 			fpoly_g01_fft_external(logn, qc(10),
 				ss->external_basis);
 			fpoly_LDL_fft(logn, qc(4), qc(10), qc(14));
@@ -1387,17 +1403,36 @@ ffsamp_fft_inner(sampler_state *ss, unsigned logn, fpr *tmp,
 
 		/* LOW_RAM: tb0 = c1 - z1*l10 in place at qc(0..3); full
 		   merged z1 lands at qc(10..13). Fused finalize as in the
-		   recursive body. */
-		fpoly_pathb_finalize(logn, qc(0), qc(10), qc(6), qc(8));
+		   recursive body. Tree path uses the _external variant
+		   with l10 from flash; on-the-fly path uses l10 at
+		   qc(10..13) (just produced by fpoly_LDL_fft above). */
+		if (tree_l10 != NULL) {
+			fpoly_pathb_finalize_external(logn,
+				qc(0), qc(10), qc(6), qc(8), tree_l10);
+		} else {
+			fpoly_pathb_finalize(logn,
+				qc(0), qc(10), qc(6), qc(8));
+		}
 
 		/* Split tb0 to callee positions, then move z1 out of the way
 		   (qc(0..3) is needed transiently as z1 storage during the
-		   left recursion since qc(4..5) holds live d00). */
+		   left recursion since qc(4..5) holds live d00 in the
+		   on-the-fly path; tree path doesn't use qc(4..5) for d00
+		   but the layout shuffle is the same so callee receives
+		   inputs at qc(6..9) consistently). */
 		fpoly_split_fft(logn, qc(6), qc(8), qc(0));
 		memcpy(qc(0), qc(10), sizeof(fpr) << logn);
 
-		/* Split d00 to obtain the left-subtree. */
-		fpoly_split_selfadj_fft(logn, qc(12), qc(10), qc(4));
+		/* Split d00 to obtain the left-subtree. Tree path reads
+		   d00 from flash; on-the-fly path uses d00 at qc(4..5)
+		   (where it was moved earlier). */
+		if (tree_d00 != NULL) {
+			fpoly_split_selfadj_fft(logn,
+				qc(12), qc(10), tree_d00);
+		} else {
+			fpoly_split_selfadj_fft(logn,
+				qc(12), qc(10), qc(4));
+		}
 		memcpy(qc(13), qc(12), sizeof(fpr) << (logn - 2));
 
 		/* Second recursive call (callee tmp = qc(6)). Left child's
@@ -1438,10 +1473,18 @@ ffsamp_fft_inner(sampler_state *ss, unsigned logn, fpr *tmp,
 	      17       right_11
 	      18..23   callee free space  */
 
-	/* Either decompose G into LDL on-the-fly (the decomposed matrix
-	   replaces G), or read pre-decomposed (l10, d00, d11) from the
-	   external tree at this (level, index) slot. Both end up with
-	   l10 at qc(8..11), d00 at qc(12..13), d11 at qc(14..15). */
+	/* B0/B1: with an external tree, fetch direct flash pointers to
+	   pre-decomposed (l10, d00, d11) at this (level, index) slot.
+	   The body branches on `tree_l10 != NULL` to read directly from
+	   flash for primitives that accept const fpr * (mul, split,
+	   pathb_finalize_external), eliminating the memcpys into qc[]
+	   that the on-the-fly path uses to materialize l10/d00/d11.
+
+	   Without a tree, fpoly_LDL_fft populates the qc(8..11)/(12..13)/
+	   (14..15) slots with l10/d00/d11 and the body proceeds as before. */
+	const fpr *tree_l10 = NULL;
+	const fpr *tree_d00 = NULL;
+	const fpr *tree_d11 = NULL;
 	if (ss->external_tree != NULL) {
 		size_t per_node =
 			((size_t)1 << (logn + 1)) * sizeof(fpr);
@@ -1452,12 +1495,10 @@ ffsamp_fft_inner(sampler_state *ss, unsigned logn, fpr *tmp,
 				+ level_base + node_index * per_node);
 		size_t full_words = (size_t)1 << logn;
 		size_t half_words = (size_t)1 << (logn - 1);
-		memcpy(qc(8), node, full_words * sizeof(fpr));
-		memcpy(qc(12),
-			node + full_words, half_words * sizeof(fpr));
-		memcpy(qc(14),
-			node + full_words + half_words,
-			half_words * sizeof(fpr));
+		tree_l10 = node;
+		tree_d00 = node + full_words;
+		tree_d11 = node + full_words + half_words;
+		(void)half_words;
 	} else {
 		fpoly_LDL_fft(logn, qc(12), qc(8), qc(14));
 	}
@@ -1465,26 +1506,39 @@ ffsamp_fft_inner(sampler_state *ss, unsigned logn, fpr *tmp,
 	/* LOW_RAM: c1 := t0 + t1*l10. Product t1*l10 lives temporarily
 	   at qc(16..19); the result lands in place at qc(0..3). */
 	memcpy(qc(16), qc(4), sizeof(fpr) << logn);
-	fpoly_mul_fft(logn, qc(16), qc(8));
+	if (tree_l10 != NULL) {
+		fpoly_mul_fft(logn, qc(16), tree_l10);
+	} else {
+		fpoly_mul_fft(logn, qc(16), qc(8));
+	}
 	fpoly_add(logn, qc(0), qc(16));
 
-	/* LOW_RAM: save l10 to qc(16..19) (frees up qc(8..11)) and move
-	   d00 from qc(12..13) to qc(8..9). After this qc(12..15) holds
-	   only d11; qc(8..11) is d00 + free space. */
-	memcpy(qc(16), qc(8), sizeof(fpr) << logn);
-	memcpy(qc(8), qc(12), sizeof(fpr) << (logn - 1));
+	if (tree_l10 == NULL) {
+		/* On-the-fly path: save l10 to qc(16..19), move d00 from
+		   qc(12..13) to qc(8..9). The tree path skips this since
+		   l10/d00 stay in flash. */
+		memcpy(qc(16), qc(8), sizeof(fpr) << logn);
+		memcpy(qc(8), qc(12), sizeof(fpr) << (logn - 1));
+	}
 
 	/* Split t1 to obtain callee inputs at qc(10..11) and qc(12..13). */
 	fpoly_split_fft(logn, qc(10), qc(12), qc(4));
 
-	/* LOW_RAM: restore l10 to qc(4..7) (t1 there is dead after split). */
-	memcpy(qc(4), qc(16), sizeof(fpr) << logn);
+	if (tree_l10 == NULL) {
+		/* On-the-fly path: restore l10 to qc(4..7) (t1 there is
+		   dead after split). Tree path uses tree_l10 directly. */
+		memcpy(qc(4), qc(16), sizeof(fpr) << logn);
+	}
 
-	/* Split d11 into the right sub-tree (split yields right_00 and
-	   right_01, right_11 is a copy of right_00). Saved to qc(18..19)
-	   first to work around split_selfadj_fft's f1==f aliasing. */
-	memcpy(qc(18), qc(14), sizeof(fpr) << (logn - 1));
-	fpoly_split_selfadj_fft(logn, qc(16), qc(14), qc(18));
+	/* Split d11 into the right sub-tree. Tree path reads d11 directly
+	   from flash; on-the-fly path saves to qc(18..19) first to work
+	   around split_selfadj_fft's f1==f aliasing. */
+	if (tree_d11 != NULL) {
+		fpoly_split_selfadj_fft(logn, qc(16), qc(14), tree_d11);
+	} else {
+		memcpy(qc(18), qc(14), sizeof(fpr) << (logn - 1));
+		fpoly_split_selfadj_fft(logn, qc(16), qc(14), qc(18));
+	}
 	memcpy(qc(17), qc(16), sizeof(fpr) << (logn - 2));
 
 	/* First recursive call on the right sub-tree (callee tmp = qc(10)).
@@ -1493,11 +1547,24 @@ ffsamp_fft_inner(sampler_state *ss, unsigned logn, fpr *tmp,
 
 	/* LOW_RAM: tb0 = c1 - z1*l10 in place at qc(0..3); z1 lands in
 	   t1 slot (qc(4..7)). Fused per-coefficient in registers; replaces
-	   baseline's 5-step (memcpy, sub, memcpy, mul, add) sequence. */
-	fpoly_pathb_finalize(logn, qc(0), qc(4), qc(10), qc(12));
+	   baseline's 5-step (memcpy, sub, memcpy, mul, add) sequence.
+	   Tree path uses _external variant with l10 from flash; on-the-fly
+	   path uses l10 at qc(4..7). */
+	if (tree_l10 != NULL) {
+		fpoly_pathb_finalize_external(logn,
+			qc(0), qc(4), qc(10), qc(12), tree_l10);
+	} else {
+		fpoly_pathb_finalize(logn, qc(0), qc(4), qc(10), qc(12));
+	}
 
-	/* Split d00 to obtain the left-subtree. */
-	fpoly_split_selfadj_fft(logn, qc(16), qc(14), qc(8));
+	/* Split d00 to obtain the left-subtree. Tree path reads d00 from
+	   flash; on-the-fly path uses d00 at qc(8..9) (where it was moved
+	   earlier). */
+	if (tree_d00 != NULL) {
+		fpoly_split_selfadj_fft(logn, qc(16), qc(14), tree_d00);
+	} else {
+		fpoly_split_selfadj_fft(logn, qc(16), qc(14), qc(8));
+	}
 	memcpy(qc(17), qc(16), sizeof(fpr) << (logn - 2));
 
 	/* Split tb0 and perform the second recursive call on the
