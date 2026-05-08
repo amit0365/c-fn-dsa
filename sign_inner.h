@@ -638,6 +638,21 @@ void fpoly_apply_basis(unsigned logn, fpr *t0, fpr *t1,
 #define fpoly_pathb_finalize   fndsa_fpoly_pathb_finalize
 void fpoly_pathb_finalize(unsigned logn, fpr *c1, fpr *t1_slot,
 	const fpr *zlow, const fpr *zhigh);
+
+/* External-l10 variant of fpoly_pathb_finalize: l10 is read from a
+ * separate read-only buffer (typically a flash-resident LDL tree node)
+ * and the merged z is written to a separate writable buffer z_out.
+ *
+ * Constraints (relaxed vs the original):
+ *   - logn >= 2.
+ *   - All five pointers may be in different buffers; c1, z_out, zlow,
+ *     zhigh must be pairwise disjoint, but l10 may live anywhere
+ *     (including read-only flash). No read-before-write ordering on
+ *     l10/z_out is required since they are separate buffers. */
+#define fpoly_pathb_finalize_external   fndsa_fpoly_pathb_finalize_external
+void fpoly_pathb_finalize_external(unsigned logn,
+	fpr *c1, fpr *z_out,
+	const fpr *zlow, const fpr *zhigh, const fpr *l10);
 #endif
 
 #if FNDSA_LOW_RAM

@@ -3047,6 +3047,198 @@ fpoly_pathb_finalize(unsigned logn, fpr *c1, fpr *t1_slot,
 #if FNDSA_LOW_RAM
 /* see sign_inner.h.
  *
+ * Variant of fpoly_pathb_finalize where l10 is read from a separate
+ * read-only buffer (typically a flash-resident LDL tree node) and the
+ * merged z is written to a separate writable buffer. This removes the
+ * read-before-write ordering constraint of the original (where l10 and
+ * z share the same buffer): the caller is free to point l10 at flash
+ * and z_out at any writable region.
+ *
+ * Identical to fpoly_pathb_finalize except:
+ *   - reads from `l10` (const fpr *) instead of `t1_slot`
+ *   - writes to `z_out` (fpr *) instead of `t1_slot`
+ * No aliasing requirements between any of the buffers (caller's
+ * responsibility to ensure l10 != z_out unless that is intentional). */
+TARGET_SSE2 TARGET_NEON
+void
+fpoly_pathb_finalize_external(unsigned logn,
+	fpr *c1, fpr *z_out,
+	const fpr *zlow, const fpr *zhigh, const fpr *l10)
+{
+	size_t hn = (size_t)1 << (logn - 1);
+	size_t qn = hn >> 1;
+
+#if FNDSA_SSE2
+	const double *zl = (const double *)zlow;
+	const double *zh = (const double *)zhigh;
+	const double *ll = (const double *)l10;
+	double *cc = (double *)c1;
+	double *zz = (double *)z_out;
+	__m128d cz = _mm_castsi128_pd(_mm_setr_epi32(0, 0, 0, -0x80000000));
+	for (size_t i = 0; i < qn; i ++) {
+		__m128d a_re = _mm_load_sd(zl + i);
+		__m128d a_im = _mm_load_sd(zl + i + qn);
+		__m128d b_re = _mm_load_sd(zh + i);
+		__m128d b_im = _mm_load_sd(zh + i + qn);
+
+		__m128d s = _mm_loadu_pd(
+			(const double *)GM + ((i + hn) << 1));
+		__m128d c1v = _mm_mul_pd(s,
+			_mm_shuffle_pd(b_re, b_im, 0));
+		__m128d c2v = _mm_mul_pd(s,
+			_mm_shuffle_pd(b_im, b_re, 0));
+
+		__m128d c_re_pkd = _mm_sub_pd(c1v,
+			_mm_shuffle_pd(c1v, c1v, 1));
+		__m128d c_im_pkd = _mm_xor_pd(cz,
+			_mm_add_pd(c2v, _mm_shuffle_pd(c2v, c2v, 1)));
+
+		__m128d z_re = _mm_add_pd(c_re_pkd,
+			_mm_shuffle_pd(a_re, a_re, 0));
+		__m128d z_im = _mm_add_pd(c_im_pkd,
+			_mm_shuffle_pd(a_im, a_im, 0));
+
+		__m128d l_re = _mm_loadu_pd(ll + (i << 1));
+		__m128d l_im = _mm_loadu_pd(ll + (i << 1) + hn);
+
+		__m128d p_re = _mm_sub_pd(
+			_mm_mul_pd(z_re, l_re),
+			_mm_mul_pd(z_im, l_im));
+		__m128d p_im = _mm_add_pd(
+			_mm_mul_pd(z_re, l_im),
+			_mm_mul_pd(z_im, l_re));
+
+		__m128d cc_re = _mm_loadu_pd(cc + (i << 1));
+		__m128d cc_im = _mm_loadu_pd(cc + (i << 1) + hn);
+		_mm_storeu_pd(cc + (i << 1), _mm_sub_pd(cc_re, p_re));
+		_mm_storeu_pd(cc + (i << 1) + hn,
+			_mm_sub_pd(cc_im, p_im));
+
+		_mm_storeu_pd(zz + (i << 1), z_re);
+		_mm_storeu_pd(zz + (i << 1) + hn, z_im);
+	}
+#elif FNDSA_NEON
+	const float64_t *zl = (const float64_t *)zlow;
+	const float64_t *zh = (const float64_t *)zhigh;
+	const float64_t *ll = (const float64_t *)l10;
+	float64_t *cc = (float64_t *)c1;
+	float64_t *zz = (float64_t *)z_out;
+	for (size_t i = 0; i < qn; i ++) {
+		float64x1_t a_re = vld1_f64(zl + i);
+		float64x1_t a_im = vld1_f64(zl + i + qn);
+		float64x1_t b_re = vld1_f64(zh + i);
+		float64x1_t b_im = vld1_f64(zh + i + qn);
+		float64x2_t b = vcombine_f64(b_re, b_im);
+
+		float64x2_t s = vld1q_f64(
+			(const float64_t *)GM + ((i + hn) << 1));
+		float64x2_t c1v = vmulq_f64(s, b);
+		float64x2_t c2v = vmulq_f64(s, vextq_f64(b, b, 1));
+		float64x1_t c_re = vsub_f64(
+			vget_low_f64(c1v), vget_high_f64(c1v));
+		float64x1_t c_im = vadd_f64(
+			vget_low_f64(c2v), vget_high_f64(c2v));
+
+		float64x1_t z0_re = vadd_f64(a_re, c_re);
+		float64x1_t z0_im = vadd_f64(a_im, c_im);
+		float64x1_t z1_re = vsub_f64(a_re, c_re);
+		float64x1_t z1_im = vsub_f64(a_im, c_im);
+
+		float64x2_t z_re = vcombine_f64(z0_re, z1_re);
+		float64x2_t z_im = vcombine_f64(z0_im, z1_im);
+
+		float64x2_t l_re = vld1q_f64(ll + (i << 1));
+		float64x2_t l_im = vld1q_f64(ll + (i << 1) + hn);
+
+		float64x2_t p_re = vfmsq_f64(
+			vmulq_f64(z_re, l_re), z_im, l_im);
+		float64x2_t p_im = vfmaq_f64(
+			vmulq_f64(z_re, l_im), z_im, l_re);
+
+		float64x2_t cc_re = vld1q_f64(cc + (i << 1));
+		float64x2_t cc_im = vld1q_f64(cc + (i << 1) + hn);
+		vst1q_f64(cc + (i << 1), vsubq_f64(cc_re, p_re));
+		vst1q_f64(cc + (i << 1) + hn, vsubq_f64(cc_im, p_im));
+
+		vst1q_f64(zz + (i << 1), z_re);
+		vst1q_f64(zz + (i << 1) + hn, z_im);
+	}
+#elif FNDSA_RV64D
+	const f64 *zl = (const f64 *)zlow;
+	const f64 *zh = (const f64 *)zhigh;
+	const f64 *ll = (const f64 *)l10;
+	f64 *cc = (f64 *)c1;
+	f64 *zz = (f64 *)z_out;
+	for (size_t i = 0; i < qn; i ++) {
+		f64 a_re = zl[i], a_im = zl[i + qn];
+		f64 b_re = zh[i], b_im = zh[i + qn];
+		f64 s_re = ((const f64 *)GM)[((i + hn) << 1) + 0];
+		f64 s_im = ((const f64 *)GM)[((i + hn) << 1) + 1];
+
+		f64 c_re = f64_sub(f64_mul(b_re, s_re), f64_mul(b_im, s_im));
+		f64 c_im = f64_add(f64_mul(b_im, s_re), f64_mul(b_re, s_im));
+		f64 z0_re = f64_add(a_re, c_re), z0_im = f64_add(a_im, c_im);
+		f64 z1_re = f64_sub(a_re, c_re), z1_im = f64_sub(a_im, c_im);
+
+		f64 l0_re = ll[(i << 1) + 0],      l0_im = ll[(i << 1) + 0 + hn];
+		f64 l1_re = ll[(i << 1) + 1],      l1_im = ll[(i << 1) + 1 + hn];
+
+		f64 p0_re = f64_sub(f64_mul(z0_re, l0_re), f64_mul(z0_im, l0_im));
+		f64 p0_im = f64_add(f64_mul(z0_re, l0_im), f64_mul(z0_im, l0_re));
+		f64 p1_re = f64_sub(f64_mul(z1_re, l1_re), f64_mul(z1_im, l1_im));
+		f64 p1_im = f64_add(f64_mul(z1_re, l1_im), f64_mul(z1_im, l1_re));
+
+		cc[(i << 1) + 0]      = f64_sub(cc[(i << 1) + 0],      p0_re);
+		cc[(i << 1) + 0 + hn] = f64_sub(cc[(i << 1) + 0 + hn], p0_im);
+		cc[(i << 1) + 1]      = f64_sub(cc[(i << 1) + 1],      p1_re);
+		cc[(i << 1) + 1 + hn] = f64_sub(cc[(i << 1) + 1 + hn], p1_im);
+
+		zz[(i << 1) + 0]      = z0_re;
+		zz[(i << 1) + 0 + hn] = z0_im;
+		zz[(i << 1) + 1]      = z1_re;
+		zz[(i << 1) + 1 + hn] = z1_im;
+	}
+#else
+	/* Scalar fallback. */
+	for (size_t i = 0; i < qn; i ++) {
+		fpr a_re = zlow[i], a_im = zlow[i + qn];
+		fpr b_re = zhigh[i], b_im = zhigh[i + qn];
+
+		fpr s_re = GM[((i + hn) << 1) + 0];
+		fpr s_im = GM[((i + hn) << 1) + 1];
+		fpr c_re, c_im;
+		FPC_MUL(c_re, c_im, b_re, b_im, s_re, s_im);
+
+		fpr z0_re, z1_re, z0_im, z1_im;
+		FPR_ADD_SUB(z0_re, z1_re, a_re, c_re);
+		FPR_ADD_SUB(z0_im, z1_im, a_im, c_im);
+
+		fpr l0_re = l10[(i << 1) + 0];
+		fpr l0_im = l10[(i << 1) + 0 + hn];
+		fpr l1_re = l10[(i << 1) + 1];
+		fpr l1_im = l10[(i << 1) + 1 + hn];
+
+		fpr p0_re, p0_im, p1_re, p1_im;
+		FPC_MUL(p0_re, p0_im, z0_re, z0_im, l0_re, l0_im);
+		FPC_MUL(p1_re, p1_im, z1_re, z1_im, l1_re, l1_im);
+
+		c1[(i << 1) + 0]      = fpr_sub(c1[(i << 1) + 0],      p0_re);
+		c1[(i << 1) + 0 + hn] = fpr_sub(c1[(i << 1) + 0 + hn], p0_im);
+		c1[(i << 1) + 1]      = fpr_sub(c1[(i << 1) + 1],      p1_re);
+		c1[(i << 1) + 1 + hn] = fpr_sub(c1[(i << 1) + 1 + hn], p1_im);
+
+		z_out[(i << 1) + 0]      = z0_re;
+		z_out[(i << 1) + 0 + hn] = z0_im;
+		z_out[(i << 1) + 1]      = z1_re;
+		z_out[(i << 1) + 1 + hn] = z1_im;
+	}
+#endif
+}
+#endif /* FNDSA_LOW_RAM */
+
+#if FNDSA_LOW_RAM
+/* see sign_inner.h.
+ *
  * Non-destructive variant of fpoly_gram_fft: reads basis from a read-only
  * external buffer and writes outputs to specified destinations. The
  * arithmetic is unchanged; only storage layout differs. g00 and g11 are
