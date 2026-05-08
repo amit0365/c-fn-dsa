@@ -163,11 +163,90 @@ run_test(unsigned logn)
 	return 0;
 }
 
-int
-main(void)
+/* End-to-end: sign with the tree-reading ffsamp path and bit-compare
+ * against the on-the-fly path. */
+static int
+run_sign_compare(unsigned logn)
 {
+	size_t sk_len = FNDSA_SIGN_KEY_SIZE(logn);
+	size_t vk_len = FNDSA_VRFY_KEY_SIZE(logn);
+	size_t basis_len = FNDSA_BASIS_SIZE(logn);
+	size_t tree_len = FNDSA_LDL_TREE_SIZE(logn);
+	size_t tmp_len = (((size_t)37 << logn) + 31);
+	size_t sig_len = FNDSA_SIGNATURE_SIZE(logn);
+
+	uint8_t *sk = malloc(sk_len);
+	uint8_t *vk = malloc(vk_len);
+	uint8_t *basis = aligned_alloc(8, (basis_len + 7) & ~(size_t)7);
+	uint8_t *tree = aligned_alloc(8, (tree_len + 7) & ~(size_t)7);
+	uint8_t *tmp1 = aligned_alloc(8, (tmp_len + 7) & ~(size_t)7);
+	uint8_t *tmp2 = aligned_alloc(8, (tmp_len + 7) & ~(size_t)7);
+	uint8_t *sig1 = malloc(sig_len);
+	uint8_t *sig2 = malloc(sig_len);
+
+	uint8_t kseed[32];
+	for (size_t i = 0; i < sizeof kseed; i++) {
+		kseed[i] = (uint8_t)(i + logn);
+	}
+	fndsa_keygen_seeded(logn, kseed, sizeof kseed, sk, vk);
+	if (!fndsa_compute_basis(sk, sk_len, basis, basis_len)) return 1;
+
+	size_t tree_tmp_len = ((size_t)4 << logn) * sizeof(double) + 31;
+	uint8_t *tree_tmp = aligned_alloc(8,
+		(tree_tmp_len + 7) & ~(size_t)7);
+	if (!fndsa_compute_ldl_tree(logn, basis, basis_len,
+		tree, tree_len, tree_tmp, tree_tmp_len)) return 1;
+	free(tree_tmp);
+
+	const char *msg = "the quick brown fox jumps over the lazy dog";
+	uint8_t sigseed[56];
+	for (size_t i = 0; i < sizeof sigseed; i++) {
+		sigseed[i] = (uint8_t)(0xAA + i);
+	}
+
+	size_t s1 = fndsa_sign_seeded_with_basis_temp(
+		sk, sk_len, basis,
+		NULL, 0, FNDSA_HASH_ID_RAW, msg, strlen(msg),
+		sigseed, sizeof sigseed,
+		sig1, sig_len, tmp1, tmp_len);
+
+	size_t s2 = fndsa_sign_seeded_with_basis_and_tree_temp(
+		sk, sk_len, basis, tree,
+		NULL, 0, FNDSA_HASH_ID_RAW, msg, strlen(msg),
+		sigseed, sizeof sigseed,
+		sig2, sig_len, tmp2, tmp_len);
+
+	if (s1 == 0 || s2 == 0) {
+		fprintf(stderr, "[logn=%u] sign failed (s1=%zu s2=%zu)\n",
+			logn, s1, s2);
+		return 1;
+	}
+	if (s1 != s2 || memcmp(sig1, sig2, s1) != 0) {
+		fprintf(stderr,
+			"[logn=%u] SIGNATURE MISMATCH (s1=%zu s2=%zu)\n",
+			logn, s1, s2);
+		return 1;
+	}
+	printf("[logn=%u] sign-with-tree matches sign-on-the-fly (sig=%zu B) PASS\n",
+		logn, s1);
+
+	free(sk); free(vk); free(basis); free(tree);
+	free(tmp1); free(tmp2); free(sig1); free(sig2);
+	return 0;
+}
+
+int
+main(int argc, char **argv)
+{
+	int do_compare = (argc > 1 && argv[1][0] == 'c');
 	if (run_test(9) != 0) return 1;
 	if (run_test(10) != 0) return 1;
+	if (do_compare) {
+		fprintf(stderr, "running sign-compare logn=9...\n");
+		if (run_sign_compare(9) != 0) return 1;
+		fprintf(stderr, "running sign-compare logn=10...\n");
+		if (run_sign_compare(10) != 0) return 1;
+	}
 	printf("All tests passed.\n");
 	return 0;
 }

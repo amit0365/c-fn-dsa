@@ -24,6 +24,7 @@ typedef struct {
 	unsigned logn;
 #if FNDSA_LOW_RAM
 	const fpr *external_basis;
+	const uint8_t *external_tree;
 #endif
 } chacha20_sampler_state;
 
@@ -177,6 +178,8 @@ chacha20rng_next_u64(chacha20rng_context *pc)
 #define sampler_next         chacha20_sampler_next
 #undef ffsamp_fft
 #define ffsamp_fft           chacha20_ffsamp_fft
+#undef ffsamp_fft_with_tree
+#define ffsamp_fft_with_tree chacha20_ffsamp_fft_with_tree
 #undef ffsamp_fft_deepest
 #define ffsamp_fft_deepest   chacha20_ffsamp_fft_deepest
 
@@ -690,6 +693,7 @@ test_sign_core(void)
 		KAT_512_RND, sizeof KAT_512_RND, sig, tmp
 #if FNDSA_LOW_RAM
 		, NULL  /* compute basis internally */
+		, NULL  /* on-the-fly LDL */
 #endif
 		);
 	if (j != FNDSA_SIGNATURE_SIZE(9)) {

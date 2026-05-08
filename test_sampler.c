@@ -20,6 +20,7 @@ typedef struct {
 	unsigned logn;
 #if FNDSA_LOW_RAM
 	const fpr *external_basis;
+	const uint8_t *external_tree;
 #endif
 } test_sampler_state;
 
@@ -63,6 +64,8 @@ test_prng_next_u64(test_rng_context *pc)
 #define sampler_next         test_sampler_next
 #undef ffsamp_fft
 #define ffsamp_fft           test_ffsamp_fft
+#undef ffsamp_fft_with_tree
+#define ffsamp_fft_with_tree test_ffsamp_fft_with_tree
 #undef ffsamp_fft_deepest
 #define ffsamp_fft_deepest   test_ffsamp_fft_deepest
 

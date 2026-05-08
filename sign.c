@@ -17,6 +17,7 @@ sign_step1(unsigned logn, const uint8_t *sign_key,
 	uint8_t *sig, void *tmp
 #if FNDSA_LOW_RAM
 	, const fpr *external_basis  /* NULL = compute internally */
+	, const uint8_t *external_tree /* NULL = on-the-fly LDL */
 #endif
 	)
 {
@@ -133,6 +134,7 @@ sign_step1(unsigned logn, const uint8_t *sign_key,
 		seed, seed_len, sig, tmp
 #if FNDSA_LOW_RAM
 		, external_basis
+		, external_tree
 #endif
 		);
 
@@ -151,7 +153,7 @@ sign_step1(unsigned logn, const uint8_t *sign_key,
 #define SIGN_WRAP_TMP_FACTOR  59
 #endif
 #if FNDSA_LOW_RAM
-#define SIGN_STEP1_NO_BASIS_ARG  , NULL
+#define SIGN_STEP1_NO_BASIS_ARG  , NULL, NULL
 #else
 #define SIGN_STEP1_NO_BASIS_ARG
 #endif
@@ -472,11 +474,13 @@ fndsa_compute_basis(
 
 /* Internal helper: validates and dispatches to sign_step1 with the
    external basis. Mirrors sign_wrapper but for the precomputed-basis
-   variant; uses the 37n+31 tmp_len threshold. */
+   variant; uses the 37n+31 tmp_len threshold.
+   Optional `tree` parameter (NULL when not used) selects the tree-reading
+   ffsamp variant (ffsamp_fft_with_tree) instead of on-the-fly LDL. */
 static size_t
 sign_with_basis_wrapper(
 	const uint8_t *sign_key, size_t sign_key_len,
-	const fpr *basis,
+	const fpr *basis, const uint8_t *tree,
 	const uint8_t *ctx, size_t ctx_len,
 	const char *id, const uint8_t *hv, size_t hv_len,
 	const uint8_t *seed, size_t seed_len,
@@ -487,6 +491,9 @@ sign_with_basis_wrapper(
 		return 0;
 	}
 	if ((uintptr_t)basis & 7) {
+		return 0;
+	}
+	if (tree != NULL && ((uintptr_t)tree & 7)) {
 		return 0;
 	}
 	unsigned head = sign_key[0];
@@ -516,7 +523,7 @@ sign_with_basis_wrapper(
 
 	return sign_step1(logn,
 		sign_key, ctx, ctx_len, id, hv, hv_len,
-		seed, seed_len, sig, tmp, basis);
+		seed, seed_len, sig, tmp, basis, tree);
 }
 
 /* see fndsa.h */
@@ -531,7 +538,7 @@ fndsa_sign_with_basis_temp(
 {
 	return sign_with_basis_wrapper(
 		sign_key, sign_key_len,
-		(const fpr *)basis,
+		(const fpr *)basis, NULL,
 		ctx, ctx_len, id, hv, hv_len,
 		NULL, 0, sig, max_sig_len, tmp, tmp_len);
 }
@@ -549,7 +556,42 @@ fndsa_sign_seeded_with_basis_temp(
 {
 	return sign_with_basis_wrapper(
 		sign_key, sign_key_len,
-		(const fpr *)basis,
+		(const fpr *)basis, NULL,
+		ctx, ctx_len, id, hv, hv_len,
+		seed, seed_len, sig, max_sig_len, tmp, tmp_len);
+}
+
+/* see fndsa.h */
+size_t
+fndsa_sign_with_basis_and_tree_temp(
+	const void *sign_key, size_t sign_key_len,
+	const void *basis, const void *tree,
+	const void *ctx, size_t ctx_len,
+	const char *id, const void *hv, size_t hv_len,
+	void *sig, size_t max_sig_len,
+	void *tmp, size_t tmp_len)
+{
+	return sign_with_basis_wrapper(
+		sign_key, sign_key_len,
+		(const fpr *)basis, (const uint8_t *)tree,
+		ctx, ctx_len, id, hv, hv_len,
+		NULL, 0, sig, max_sig_len, tmp, tmp_len);
+}
+
+/* see fndsa.h */
+size_t
+fndsa_sign_seeded_with_basis_and_tree_temp(
+	const void *sign_key, size_t sign_key_len,
+	const void *basis, const void *tree,
+	const void *ctx, size_t ctx_len,
+	const char *id, const void *hv, size_t hv_len,
+	const void *seed, size_t seed_len,
+	void *sig, size_t max_sig_len,
+	void *tmp, size_t tmp_len)
+{
+	return sign_with_basis_wrapper(
+		sign_key, sign_key_len,
+		(const fpr *)basis, (const uint8_t *)tree,
 		ctx, ctx_len, id, hv, hv_len,
 		seed, seed_len, sig, max_sig_len, tmp, tmp_len);
 }

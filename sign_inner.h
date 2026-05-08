@@ -715,6 +715,12 @@ typedef struct {
 	   the with_basis API; left NULL otherwise (in which case the
 	   standard the recursive body runs even at the outer level). */
 	const fpr *external_basis;
+	/* When non-NULL, ffsamp uses pre-decomposed (l10, d00, d11) values
+	   from this tree at every recursion level instead of running
+	   fpoly_LDL_fft on-the-fly. Format: FNDSA_LDL_TREE (level-major BFS).
+	   Set by sign_core only when a tree was passed via the
+	   with_basis_and_tree API; left NULL otherwise. */
+	const uint8_t *external_tree;
 #endif
 } sampler_state;
 
@@ -746,6 +752,15 @@ int32_t sampler_next(sampler_state *ss, fpr mu, fpr isigma);
    over [t0,t1]. */
 #define ffsamp_fft   fndsa_ffsamp_fft
 void ffsamp_fft(sampler_state *ss, fpr *tmp);
+
+#if FNDSA_LOW_RAM
+/* Tree-reading variant of ffsamp_fft. Reads pre-decomposed (l10, d00,
+   d11) from ss->external_tree (must be non-NULL) at each recursion
+   level instead of running fpoly_LDL_fft. tmp[] layout and size
+   requirements match ffsamp_fft. */
+#define ffsamp_fft_with_tree   fndsa_ffsamp_fft_with_tree
+void ffsamp_fft_with_tree(sampler_state *ss, fpr *tmp);
+#endif
 
 /* This function is global on ARM Cortex M4 so that it can be called
    from assembly code. We define its global name here so that test code
@@ -779,6 +794,7 @@ size_t sign_core(unsigned logn,
 	const uint8_t *seed, size_t seed_len, uint8_t *sig, void *tmp
 #if FNDSA_LOW_RAM
 	, const fpr *external_basis
+	, const uint8_t *external_tree
 #endif
 	);
 

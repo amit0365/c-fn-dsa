@@ -402,6 +402,28 @@ int fndsa_compute_ldl_tree(
 	void *tree_buf, size_t tree_buf_len,
 	void *tmp, size_t tmp_len);
 
+/* Sign with a precomputed basis AND a precomputed LDL tree. The tree
+ * lets ffsamp read pre-decomposed (l10, d00, d11) values from flash
+ * instead of running fpoly_LDL_fft on-the-fly. tree must be 8-byte
+ * aligned and at least FNDSA_LDL_TREE_SIZE(logn) bytes. basis and tree
+ * must have been computed from the same sign_key. */
+size_t fndsa_sign_with_basis_and_tree_temp(
+	const void *sign_key, size_t sign_key_len,
+	const void *basis, const void *tree,
+	const void *ctx, size_t ctx_len,
+	const char *id, const void *hv, size_t hv_len,
+	void *sig, size_t max_sig_len,
+	void *tmp, size_t tmp_len);
+
+size_t fndsa_sign_seeded_with_basis_and_tree_temp(
+	const void *sign_key, size_t sign_key_len,
+	const void *basis, const void *tree,
+	const void *ctx, size_t ctx_len,
+	const char *id, const void *hv, size_t hv_len,
+	const void *seed, size_t seed_len,
+	void *sig, size_t max_sig_len,
+	void *tmp, size_t tmp_len);
+
 /*
  * The fndsa_sign_*() functions declared above require the signing key
  * degree to be secure (512 or 1024). The fndsa_sign_weak_*() functions
