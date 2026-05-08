@@ -476,7 +476,13 @@ fndsa_compute_basis(
    external basis. Mirrors sign_wrapper but for the precomputed-basis
    variant; uses the 37n+31 tmp_len threshold.
    Optional `tree` parameter (NULL when not used) selects the tree-reading
-   ffsamp variant (ffsamp_fft_with_tree) instead of on-the-fly LDL. */
+   ffsamp variant (ffsamp_fft_with_tree) instead of on-the-fly LDL.
+   The tree variant retains the same 37n+31 minimum: while the tree
+   path doesn't store l10/d00/d11 in qc[] (B1 step 2 eliminated those
+   memcpys), the qc slots that hold them are interleaved within the
+   ffsamp layout (not at the end), so the buffer cannot be shrunk
+   without an algorithmic restructure of the recursive body's qc
+   offsets. */
 static size_t
 sign_with_basis_wrapper(
 	const uint8_t *sign_key, size_t sign_key_len,
@@ -512,11 +518,10 @@ sign_with_basis_wrapper(
 	}
 	/* tmp[] layout under FNDSA_LOW_RAM: ffsamp outer peak (4n fpr) +
 	   FP-stays post-ffsamp scratch (ends at byte 34n: w0+w1+f+g) +
-	   hm (2n) + G (n) + 31 = 37n+31 bytes. The API minimum is
-	   pinned at 37n+31 across all builds (SIMD and scalar) so callers
-	   only need to remember one number. Scalar builds technically
-	   use slightly less post-ffsamp scratch but the difference is
-	   ~1 KiB at logn=9 — negligible. */
+	   hm (2n) + G (n) + 31 = 37n+31 bytes. Same minimum for the
+	   tree variant: B1 step 2 eliminates the memcpys but does not
+	   shrink the qc layout (unused slots are interleaved, not at
+	   the buffer end). */
 	if (tmp == NULL || tmp_len < (((size_t)37 << logn) + 31)) {
 		return 0;
 	}
