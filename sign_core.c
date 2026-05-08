@@ -289,15 +289,10 @@ basis_setup_done:;
 		   We now do the Fast Fourier sampling, which uses
 		   up to 3*n slots beyond t1 (hence 7*n total usage
 		   in tmp[]). */
-#if FNDSA_LOW_RAM
-		if (ss.external_tree != NULL) {
-			ffsamp_fft_with_tree(&ss, tmp);
-		} else {
-			ffsamp_fft(&ss, tmp);
-		}
-#else
+		/* ffsamp_fft handles both on-the-fly LDL and tree-reading
+		   paths: the latter is selected by ss.external_tree being
+		   non-NULL inside ffsamp_fft_inner. */
 		ffsamp_fft(&ss, tmp);
-#endif
 
 		/*
 		 * At this point, [t0,t1] are the FFT representation of
