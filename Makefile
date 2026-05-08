@@ -69,7 +69,7 @@ LIBS =
 
 OBJ_COMM = codec.o mq.o sha3.o sysrng.o util.o
 OBJ_KGEN = kgen.o kgen_fxp.o kgen_gauss.o kgen_mp31.o kgen_ntru.o kgen_poly.o kgen_zint31.o
-OBJ_SIGN = sign.o sign_core.o sign_fpoly.o sign_fpr.o sign_sampler.o
+OBJ_SIGN = sign.o sign_core.o sign_fpoly.o sign_fpr.o sign_sampler.o kgen_ldl_tree.o
 OBJ_VRFY = vrfy.o
 OBJ = $(OBJ_COMM) $(OBJ_KGEN) $(OBJ_SIGN) $(OBJ_VRFY)
 TESTOBJ = test_fndsa.o test_sampler.o test_sign.o
@@ -148,6 +148,9 @@ sign_fpr.o: sign_fpr.c fndsa.h sign_inner.h inner.h
 
 sign_sampler.o: sign_sampler.c fndsa.h sign_inner.h inner.h
 	$(CC) $(CFLAGS) -c -o sign_sampler.o sign_sampler.c
+
+kgen_ldl_tree.o: kgen_ldl_tree.c fndsa.h sign_inner.h inner.h
+	$(CC) $(CFLAGS) -c -o kgen_ldl_tree.o kgen_ldl_tree.c
 
 vrfy.o: vrfy.c fndsa.h inner.h
 	$(CC) $(CFLAGS) -c -o vrfy.o vrfy.c

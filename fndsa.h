@@ -357,6 +357,51 @@ size_t fndsa_sign_seeded_with_basis_temp(
 	void *sig, size_t max_sig_len,
 	void *tmp, size_t tmp_len);
 
+/* ===================================================================== *
+ * LDL tree precomputation (flash-resident, B0)
+ *
+ * In addition to the precomputed basis (above), an even more aggressive
+ * memory reduction stores the full LDL decomposition tree (all l10/d00/d11
+ * sub-Gram values needed by ffsamp) in a separate persistent buffer.
+ * Signing then reads pre-decomposed values instead of running fpoly_LDL_fft
+ * on-the-fly. Cuts the ffsamp working set from 4n fpr (with_basis) toward
+ * 3n fpr (with_basis_and_tree), at the cost of additional flash storage.
+ *
+ * Tree size: (logn - 1) * 2n fpr = (logn - 1) * 16n bytes
+ *   FN-DSA-512  (logn=9):   8 * 8192  =  65 536 bytes  (64 KiB)
+ *   FN-DSA-1024 (logn=10):  9 * 16384 = 147 456 bytes (144 KiB)
+ *
+ * Tree layout (level-major BFS for indexed access):
+ *   Level k holds 2^(logn-k) nodes, each containing:
+ *     l10  (2^k fpr,         full polynomial)
+ *     d00  (2^(k-1) fpr,     self-adjoint half)
+ *     d11  (2^(k-1) fpr,     self-adjoint half)
+ *   Per-level size is 2n fpr = 16n bytes (constant across levels).
+ *
+ * For deployment on memory-constrained SE chips, the tree buffer can live
+ * in flash alongside the basis. The library does NOT manage atomicity;
+ * callers requiring tear-resistance against power loss mid-write should
+ * implement their own atomic-flag protocol on top of these primitives.
+ */
+#define FNDSA_LDL_TREE_SIZE(logn)   \
+	((logn) >= 2 ? ((size_t)((logn) - 1) << ((logn) + 4)) : (size_t)0)
+
+/* Precompute the LDL tree from a basis previously computed by
+ * fndsa_compute_basis(). tree_buf must be at least FNDSA_LDL_TREE_SIZE(logn)
+ * bytes and 8-byte aligned.
+ *
+ * tmp must be at least (4n + 4) * sizeof(fpr) + 31 bytes; this holds the
+ * outer-level Gram (3n fpr for g00, g01, g11) plus a small scratch region
+ * used for self-adjoint splits during recursion.
+ *
+ * Returns 1 on success, 0 on error (invalid logn, undersized buffer,
+ * misaligned buffer). */
+int fndsa_compute_ldl_tree(
+	unsigned logn,
+	const void *basis, size_t basis_len,
+	void *tree_buf, size_t tree_buf_len,
+	void *tmp, size_t tmp_len);
+
 /*
  * The fndsa_sign_*() functions declared above require the signing key
  * degree to be secure (512 or 1024). The fndsa_sign_weak_*() functions
