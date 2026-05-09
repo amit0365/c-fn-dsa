@@ -358,6 +358,63 @@ size_t fndsa_sign_seeded_with_basis_temp(
 	void *tmp, size_t tmp_len);
 
 /* ===================================================================== *
+ * G storage in NVRAM (B3, scalar-friendly)
+ *
+ * On scalar / Cortex-M3 builds, sign_core's post-ffsamp uses the
+ * integer-NTT path which reads the int8 G[] (B2's basis-direct
+ * optimization is FP-domain only and doesn't apply here). G is n bytes
+ * and is currently stored in tmp[] at byte 36n.
+ *
+ * If G is precomputed at provisioning time alongside the basis and
+ * stored in NVRAM, sign_step1 doesn't need to derive G each sign,
+ * and the n bytes at byte 36n become free. tmp_len drops by n bytes
+ * across both scalar (37n+31 → 36n+31) and SIMD builds (already at
+ * 34n+31 from B2; B3 doesn't shrink further on SIMD).
+ *
+ * Effect:
+ *   logn=9:  scalar tmp_len 37n+31 → 36n+31 (saves 512 B)
+ *   logn=10: scalar tmp_len 37n+31 → 36n+31 (saves 1024 B)
+ *   per-sign CPU on scalar: ~3-5% faster (skips ~10 ms G derivation)
+ *   per-key NVRAM: +n bytes (negligible)
+ *
+ * For deployment: caller stores the n-byte G alongside the basis in
+ * flash (e.g. concatenated, or in a separate region). sign_*_with_
+ * basis_and_G_temp() reads G via the supplied pointer. */
+#define FNDSA_G_SIZE(logn)   ((size_t)1 << (logn))
+
+/* Compute basis AND the corresponding G[] (int8) from the sign key.
+ * basis_buf must be at least FNDSA_BASIS_SIZE(logn) bytes and 8-byte
+ * aligned. G_buf must be at least FNDSA_G_SIZE(logn) bytes (no
+ * alignment requirement since it's int8). Returns 1 on success, 0 on
+ * error. */
+int fndsa_compute_basis_and_G(
+	const void *sign_key, size_t sign_key_len,
+	void *basis_buf, size_t basis_buf_len,
+	void *G_buf, size_t G_buf_len);
+
+/* Sign with both a precomputed basis and a precomputed G.
+ * tmp_len minimum is 36n+31 (vs 37n+31 for the basis-only API).
+ * basis must be 8-byte aligned and FNDSA_BASIS_SIZE(logn) bytes.
+ * G_buf must be FNDSA_G_SIZE(logn) bytes.
+ * basis and G_buf must have been computed from the same sign_key. */
+size_t fndsa_sign_with_basis_and_G_temp(
+	const void *sign_key, size_t sign_key_len,
+	const void *basis, const void *G_buf,
+	const void *ctx, size_t ctx_len,
+	const char *id, const void *hv, size_t hv_len,
+	void *sig, size_t max_sig_len,
+	void *tmp, size_t tmp_len);
+
+size_t fndsa_sign_seeded_with_basis_and_G_temp(
+	const void *sign_key, size_t sign_key_len,
+	const void *basis, const void *G_buf,
+	const void *ctx, size_t ctx_len,
+	const char *id, const void *hv, size_t hv_len,
+	const void *seed, size_t seed_len,
+	void *sig, size_t max_sig_len,
+	void *tmp, size_t tmp_len);
+
+/* ===================================================================== *
  * LDL tree precomputation (flash-resident, B0)
  *
  * In addition to the precomputed basis (above), an even more aggressive

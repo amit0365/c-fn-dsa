@@ -18,6 +18,7 @@ sign_step1(unsigned logn, const uint8_t *sign_key,
 #if FNDSA_LOW_RAM
 	, const fpr *external_basis  /* NULL = compute internally */
 	, const uint8_t *external_tree /* NULL = on-the-fly LDL */
+	, const int8_t *external_G   /* B3: NULL = compute internally */
 #endif
 	)
 {
@@ -99,12 +100,23 @@ sign_step1(unsigned logn, const uint8_t *sign_key,
 		/* f is not invertible; the key is not valid */
 		return 0;
 	}
-#if FNDSA_LOW_RAM && (FNDSA_SSE2 || FNDSA_NEON || FNDSA_RV64D)
-	/* B2: skip G derivation when sign_core will take the FP-domain
-	   post-ffsamp path (basis-direct via external_basis). On scalar
-	   builds (no SIMD), the integer-NTT post-ffsamp path still
-	   reads G[], so we MUST compute it. */
-	if (external_basis == NULL)
+#if FNDSA_LOW_RAM
+	/* Skip G derivation when:
+	   B3: external_G is provided (caller has G in NVRAM); OR
+	   B2: external_basis is provided AND we'll use the FP-domain
+	       post-ffsamp path (SIMD only). On scalar without
+	       external_G, integer-NTT post-ffsamp reads G[], so we
+	       MUST compute it. */
+	int skip_G_compute = 0;
+	if (external_G != NULL) {
+		skip_G_compute = 1;
+	}
+#if FNDSA_SSE2 || FNDSA_NEON || FNDSA_RV64D
+	else if (external_basis != NULL) {
+		skip_G_compute = 1;
+	}
+#endif
+	if (!skip_G_compute)
 #endif
 	{
 		/* t1 <- G = h*F */
@@ -117,6 +129,13 @@ sign_step1(unsigned logn, const uint8_t *sign_key,
 			return 0;
 		}
 	}
+#if FNDSA_LOW_RAM
+	/* When external_G is provided, sign_core's G parameter points to
+	   the caller-supplied buffer instead of tmp[]. */
+	if (external_G != NULL) {
+		G = (int8_t *)external_G;
+	}
+#endif
 	/* t0 contains h (in ntt representation), we encode and hash
 	   the verifying key.
 	   TODO: if the original Falcon mode is retained, then we can
@@ -166,7 +185,7 @@ sign_step1(unsigned logn, const uint8_t *sign_key,
 #define SIGN_WRAP_TMP_FACTOR  59
 #endif
 #if FNDSA_LOW_RAM
-#define SIGN_STEP1_NO_BASIS_ARG  , NULL, NULL
+#define SIGN_STEP1_NO_BASIS_ARG  , NULL, NULL, NULL
 #else
 #define SIGN_STEP1_NO_BASIS_ARG
 #endif
@@ -384,11 +403,14 @@ fndsa_sign_weak_seeded_temp(const void *sign_key, size_t sign_key_len,
  * FNDSA_LOW_RAM: precomputed-basis API
  * ==================================================================== */
 
-/* see fndsa.h */
-int
-fndsa_compute_basis(
+/* Internal helper: compute basis (always) and optionally output G as int8.
+ * If G_buf is non-NULL, G is written there; otherwise the computed G is
+ * only used to build basis and is discarded. */
+static int
+compute_basis_inner(
 	const void *sign_key, size_t sign_key_len,
-	void *basis_buf, size_t basis_buf_len)
+	void *basis_buf, size_t basis_buf_len,
+	int8_t *G_out)
 {
 	if (sign_key == NULL || sign_key_len < 1) {
 		return 0;
@@ -464,6 +486,12 @@ fndsa_compute_basis(
 		return 0;
 	}
 
+	/* B3: optionally output G to caller's buffer for sign-time use
+	   without per-sign G derivation. */
+	if (G_out != NULL) {
+		memcpy(G_out, G_buf, n);
+	}
+
 	/* Build basis B = [[g, -f], [G, -F]] in FFT representation,
 	   matching basis_to_FFT in sign_core.c. */
 	fpr *basis = (fpr *)basis_buf;
@@ -485,6 +513,43 @@ fndsa_compute_basis(
 	return 1;
 }
 
+/* see fndsa.h */
+int
+fndsa_compute_basis(
+	const void *sign_key, size_t sign_key_len,
+	void *basis_buf, size_t basis_buf_len)
+{
+	return compute_basis_inner(sign_key, sign_key_len,
+		basis_buf, basis_buf_len, NULL);
+}
+
+/* see fndsa.h. B3: also outputs G[] (int8) for callers that want to
+   skip per-sign G derivation. G_buf must be at least n bytes. */
+int
+fndsa_compute_basis_and_G(
+	const void *sign_key, size_t sign_key_len,
+	void *basis_buf, size_t basis_buf_len,
+	void *G_buf, size_t G_buf_len)
+{
+	if (sign_key == NULL || sign_key_len < 1) {
+		return 0;
+	}
+	unsigned head = ((const uint8_t *)sign_key)[0];
+	if ((head & 0xF0) != 0x50) {
+		return 0;
+	}
+	unsigned logn = head & 0x0F;
+	if (logn < 9 || logn > 10) {
+		return 0;
+	}
+	size_t n = (size_t)1 << logn;
+	if (G_buf == NULL || G_buf_len < n) {
+		return 0;
+	}
+	return compute_basis_inner(sign_key, sign_key_len,
+		basis_buf, basis_buf_len, (int8_t *)G_buf);
+}
+
 /* Internal helper: validates and dispatches to sign_step1 with the
    external basis. Mirrors sign_wrapper but for the precomputed-basis
    variant; uses the 37n+31 tmp_len threshold.
@@ -499,7 +564,7 @@ fndsa_compute_basis(
 static size_t
 sign_with_basis_wrapper(
 	const uint8_t *sign_key, size_t sign_key_len,
-	const fpr *basis, const uint8_t *tree,
+	const fpr *basis, const uint8_t *tree, const int8_t *G_ext,
 	const uint8_t *ctx, size_t ctx_len,
 	const char *id, const uint8_t *hv, size_t hv_len,
 	const uint8_t *seed, size_t seed_len,
@@ -538,13 +603,17 @@ sign_with_basis_wrapper(
 	         Integer-NTT post-ffsamp path still reads G[];
 	         G must live at byte 36n. Lower bound stays 37n+31. */
 #if FNDSA_SSE2 || FNDSA_NEON || FNDSA_RV64D
-	/* B2+Phase5: G eliminated, hm at byte 32n (recomputed
-	   post-ffsamp), tmp_len = 34n+31. Saves 3n bytes vs the
-	   pre-B2 baseline of 37n+31. */
+	/* B2+Phase5: G eliminated (B2 takes care of it on SIMD), hm at
+	   byte 32n (recomputed post-ffsamp), tmp_len = 34n+31. */
 	size_t min_tmp_len = ((size_t)34 << logn) + 31;
 #else
-	/* Scalar: integer-NTT post-ffsamp needs G[]. */
-	size_t min_tmp_len = ((size_t)37 << logn) + 31;
+	/* Scalar: integer-NTT post-ffsamp needs G[]. With B3 (caller-
+	   supplied G in NVRAM via G_ext), G isn't stored in tmp[] and
+	   tmp_len drops to 36n+31. Without B3, G occupies byte 36n and
+	   tmp_len is 37n+31. */
+	size_t min_tmp_len = (G_ext != NULL)
+		? ((size_t)36 << logn) + 31
+		: ((size_t)37 << logn) + 31;
 #endif
 	if (tmp == NULL || tmp_len < min_tmp_len) {
 		return 0;
@@ -552,7 +621,7 @@ sign_with_basis_wrapper(
 
 	return sign_step1(logn,
 		sign_key, ctx, ctx_len, id, hv, hv_len,
-		seed, seed_len, sig, tmp, basis, tree);
+		seed, seed_len, sig, tmp, basis, tree, G_ext);
 }
 
 /* see fndsa.h */
@@ -567,7 +636,7 @@ fndsa_sign_with_basis_temp(
 {
 	return sign_with_basis_wrapper(
 		sign_key, sign_key_len,
-		(const fpr *)basis, NULL,
+		(const fpr *)basis, NULL, NULL,
 		ctx, ctx_len, id, hv, hv_len,
 		NULL, 0, sig, max_sig_len, tmp, tmp_len);
 }
@@ -585,7 +654,7 @@ fndsa_sign_seeded_with_basis_temp(
 {
 	return sign_with_basis_wrapper(
 		sign_key, sign_key_len,
-		(const fpr *)basis, NULL,
+		(const fpr *)basis, NULL, NULL,
 		ctx, ctx_len, id, hv, hv_len,
 		seed, seed_len, sig, max_sig_len, tmp, tmp_len);
 }
@@ -602,7 +671,7 @@ fndsa_sign_with_basis_and_tree_temp(
 {
 	return sign_with_basis_wrapper(
 		sign_key, sign_key_len,
-		(const fpr *)basis, (const uint8_t *)tree,
+		(const fpr *)basis, (const uint8_t *)tree, NULL,
 		ctx, ctx_len, id, hv, hv_len,
 		NULL, 0, sig, max_sig_len, tmp, tmp_len);
 }
@@ -620,7 +689,43 @@ fndsa_sign_seeded_with_basis_and_tree_temp(
 {
 	return sign_with_basis_wrapper(
 		sign_key, sign_key_len,
-		(const fpr *)basis, (const uint8_t *)tree,
+		(const fpr *)basis, (const uint8_t *)tree, NULL,
+		ctx, ctx_len, id, hv, hv_len,
+		seed, seed_len, sig, max_sig_len, tmp, tmp_len);
+}
+
+/* see fndsa.h. B3: sign with caller-supplied basis AND G[]. */
+size_t
+fndsa_sign_with_basis_and_G_temp(
+	const void *sign_key, size_t sign_key_len,
+	const void *basis, const void *G_buf,
+	const void *ctx, size_t ctx_len,
+	const char *id, const void *hv, size_t hv_len,
+	void *sig, size_t max_sig_len,
+	void *tmp, size_t tmp_len)
+{
+	if (G_buf == NULL) return 0;
+	return sign_with_basis_wrapper(
+		sign_key, sign_key_len,
+		(const fpr *)basis, NULL, (const int8_t *)G_buf,
+		ctx, ctx_len, id, hv, hv_len,
+		NULL, 0, sig, max_sig_len, tmp, tmp_len);
+}
+
+size_t
+fndsa_sign_seeded_with_basis_and_G_temp(
+	const void *sign_key, size_t sign_key_len,
+	const void *basis, const void *G_buf,
+	const void *ctx, size_t ctx_len,
+	const char *id, const void *hv, size_t hv_len,
+	const void *seed, size_t seed_len,
+	void *sig, size_t max_sig_len,
+	void *tmp, size_t tmp_len)
+{
+	if (G_buf == NULL) return 0;
+	return sign_with_basis_wrapper(
+		sign_key, sign_key_len,
+		(const fpr *)basis, NULL, (const int8_t *)G_buf,
 		ctx, ctx_len, id, hv, hv_len,
 		seed, seed_len, sig, max_sig_len, tmp, tmp_len);
 }
