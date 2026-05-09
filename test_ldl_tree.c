@@ -172,7 +172,9 @@ run_sign_compare(unsigned logn)
 	size_t vk_len = FNDSA_VRFY_KEY_SIZE(logn);
 	size_t basis_len = FNDSA_BASIS_SIZE(logn);
 	size_t tree_len = FNDSA_LDL_TREE_SIZE(logn);
-	size_t tmp_len = (((size_t)36 << logn) + 31);
+	/* Use 37n+31 to support both SIMD (B2 minimum 36n+31) and scalar
+	   (still needs 37n+31 for G[] storage) builds. */
+	size_t tmp_len = (((size_t)37 << logn) + 31);
 	size_t sig_len = FNDSA_SIGNATURE_SIZE(logn);
 
 	uint8_t *sk = malloc(sk_len);
@@ -250,7 +252,9 @@ run_sentinel_test(unsigned logn)
 	size_t vk_len = FNDSA_VRFY_KEY_SIZE(logn);
 	size_t basis_len = FNDSA_BASIS_SIZE(logn);
 	size_t tree_len = FNDSA_LDL_TREE_SIZE(logn);
-	size_t tmp_len = (((size_t)36 << logn) + 31);
+	/* Use 37n+31 to support both SIMD (B2 minimum 36n+31) and scalar
+	   (still needs 37n+31 for G[] storage) builds. */
+	size_t tmp_len = (((size_t)37 << logn) + 31);
 	size_t sig_len = FNDSA_SIGNATURE_SIZE(logn);
 
 	uint8_t *sk = malloc(sk_len);

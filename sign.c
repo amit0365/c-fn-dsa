@@ -99,12 +99,15 @@ sign_step1(unsigned logn, const uint8_t *sign_key,
 		/* f is not invertible; the key is not valid */
 		return 0;
 	}
-#if FNDSA_LOW_RAM
+#if FNDSA_LOW_RAM && (FNDSA_SSE2 || FNDSA_NEON || FNDSA_RV64D)
+	/* B2: skip G derivation when sign_core will take the FP-domain
+	   post-ffsamp path (basis-direct via external_basis). On scalar
+	   builds (no SIMD), the integer-NTT post-ffsamp path still
+	   reads G[], so we MUST compute it. */
 	if (external_basis == NULL)
 #endif
 	{
-		/* t1 <- G = h*F (skipped when external_basis is provided
-		   since sign_core's basis-direct path doesn't need G[]). */
+		/* t1 <- G = h*F */
 		mqpoly_small_to_int(logn, F, t1);
 		mqpoly_int_to_ntt(logn, t1);
 		mqpoly_mul_ntt(logn, t1, t0);
@@ -526,16 +529,20 @@ sign_with_basis_wrapper(
 	if (max_sig_len < FNDSA_SIGNATURE_SIZE(logn)) {
 		return 0;
 	}
-	/* tmp[] layout under FNDSA_LOW_RAM (with basis, B2 active):
-	     ffsamp peak (34n) + hm (2n) + 31 align = 36n+31 bytes
-	     G is no longer stored: sign_step1 skips its derivation when
-	     external_basis is provided, and sign_core's basis-direct
-	     post-ffsamp reads basis in FFT form instead of int8 G[].
-	     Saves n bytes vs the previous 37n+31 lower bound.
-	     The tree variant uses the same minimum (the qc-layout
-	     interleavings prevent shrinking further within ffsamp).
-	     Further reduction requires hm-recompute (separate optimization). */
-	if (tmp == NULL || tmp_len < (((size_t)36 << logn) + 31)) {
+	/* tmp[] layout under FNDSA_LOW_RAM:
+	     SIMD build with B2 (basis-direct post-ffsamp):
+	         ffsamp peak (34n) + hm (2n) + 31 align = 36n+31 bytes
+	         G no longer stored: sign_step1 skips derivation, sign_core
+	         reads basis directly in FFT form.
+	     Scalar build (no SIMD, e.g. Cortex-M3):
+	         Integer-NTT post-ffsamp path still reads G[];
+	         G must live at byte 36n. Lower bound stays 37n+31. */
+#if FNDSA_SSE2 || FNDSA_NEON || FNDSA_RV64D
+	size_t min_tmp_len = ((size_t)36 << logn) + 31;
+#else
+	size_t min_tmp_len = ((size_t)37 << logn) + 31;
+#endif
+	if (tmp == NULL || tmp_len < min_tmp_len) {
 		return 0;
 	}
 
