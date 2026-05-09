@@ -241,6 +241,15 @@
    more than just keeping it in scratch. Saves another 4 KiB at
    FN-DSA-512 / 8 KiB at FN-DSA-1024.
 
+   Layer B3 (G in NVRAM): scalar/Cortex-M3 optimization. The integer-NTT
+   post-ffsamp path on scalar reads int8 G[] which would normally live
+   at byte 36n in tmp[]. If the caller precomputes G at provisioning
+   alongside the basis (one extra n bytes in NVRAM, derived once via
+   ~10 ms NTT pipeline) and supplies it to sign via
+   fndsa_sign_*_with_basis_and_G_temp(), sign_step1 skips its G
+   derivation and tmp_len drops from 37n+31 to 36n+31. Saves n bytes
+   tmp[] and ~10 ms per sign on Cortex-M3.
+
    Layer B2 (basis-direct post-ffsamp): when external_basis is provided,
    the post-ffsamp lattice-point multiplication
      v0 = t0*g + t1*G,  v1 = -t0*f - t1*F
