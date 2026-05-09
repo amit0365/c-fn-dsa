@@ -157,9 +157,18 @@ sign_core(unsigned logn,
 		         fused primitive + l10 recompute; FP-stays post-ffsamp
 		         scratch ends at byte 34n, so hm at 34n is the first safe
 		         slot.)
+		     FNDSA_LOW_RAM with basis + B2 + Phase 5:  32n bytes
+		         hm overlaps with the now-unused post-ffsamp f/g
+		         re-decode region; hm gets corrupted by ffsamp callee
+		         overflow but is RECOMPUTED post-ffsamp before s1 use.
 		     FNDSA_LOW_RAM no-basis sign path:        48n bytes */
-#if FNDSA_LOW_RAM
+#if FNDSA_LOW_RAM && (FNDSA_SSE2 || FNDSA_NEON || FNDSA_RV64D)
+		/* B2+Phase5: hm at byte 32n, recomputed post-ffsamp. */
+		size_t hm_offset_n = (external_basis != NULL) ? 32 : 48;
+#elif FNDSA_LOW_RAM
 		size_t hm_offset_n = (external_basis != NULL) ? 34 : 48;
+#endif
+#if FNDSA_LOW_RAM
 		uint16_t *hm = (uint16_t *)((uint8_t *)tmp + hm_offset_n * n);
 #else
 		uint16_t *hm = (uint16_t *)((uint8_t *)tmp + 56 * n);
@@ -495,6 +504,17 @@ basis_setup_done:;
 		}
 		fpoly_iFFT(logn, t0);
 		fpoly_iFFT(logn, t1);
+
+#if FNDSA_LOW_RAM && (FNDSA_SSE2 || FNDSA_NEON || FNDSA_RV64D)
+		if (external_basis != NULL) {
+			/* B2+Phase5: hm bytes were corrupted by ffsamp's
+			   callee overflow during recursion. Recompute hm
+			   here before post-ffsamp's s1 reads it. The cost
+			   is one extra hash_to_point per sign attempt. */
+			hash_to_point(logn, nonce, hashed_vk,
+				ctx, ctx_len, id, hv, hv_len, hm);
+		}
+#endif
 
 		/* We compute s1, then s2 into buffer s2 (s1 is not
 		   retained). We accumulate their squared norm in sqn,

@@ -172,9 +172,13 @@ run_sign_compare(unsigned logn)
 	size_t vk_len = FNDSA_VRFY_KEY_SIZE(logn);
 	size_t basis_len = FNDSA_BASIS_SIZE(logn);
 	size_t tree_len = FNDSA_LDL_TREE_SIZE(logn);
-	/* Use 37n+31 to support both SIMD (B2 minimum 36n+31) and scalar
-	   (still needs 37n+31 for G[] storage) builds. */
+	/* Use platform-aware sizing: SIMD with B2+Phase5 needs only 34n+31;
+	   scalar still needs 37n+31. */
+#if FNDSA_SSE2 || FNDSA_NEON || FNDSA_RV64D
+	size_t tmp_len = (((size_t)34 << logn) + 31);
+#else
 	size_t tmp_len = (((size_t)37 << logn) + 31);
+#endif
 	size_t sig_len = FNDSA_SIGNATURE_SIZE(logn);
 
 	uint8_t *sk = malloc(sk_len);
@@ -252,9 +256,13 @@ run_sentinel_test(unsigned logn)
 	size_t vk_len = FNDSA_VRFY_KEY_SIZE(logn);
 	size_t basis_len = FNDSA_BASIS_SIZE(logn);
 	size_t tree_len = FNDSA_LDL_TREE_SIZE(logn);
-	/* Use 37n+31 to support both SIMD (B2 minimum 36n+31) and scalar
-	   (still needs 37n+31 for G[] storage) builds. */
+	/* Use platform-aware sizing: SIMD with B2+Phase5 needs only 34n+31;
+	   scalar still needs 37n+31. */
+#if FNDSA_SSE2 || FNDSA_NEON || FNDSA_RV64D
+	size_t tmp_len = (((size_t)34 << logn) + 31);
+#else
 	size_t tmp_len = (((size_t)37 << logn) + 31);
+#endif
 	size_t sig_len = FNDSA_SIGNATURE_SIZE(logn);
 
 	uint8_t *sk = malloc(sk_len);

@@ -538,8 +538,12 @@ sign_with_basis_wrapper(
 	         Integer-NTT post-ffsamp path still reads G[];
 	         G must live at byte 36n. Lower bound stays 37n+31. */
 #if FNDSA_SSE2 || FNDSA_NEON || FNDSA_RV64D
-	size_t min_tmp_len = ((size_t)36 << logn) + 31;
+	/* B2+Phase5: G eliminated, hm at byte 32n (recomputed
+	   post-ffsamp), tmp_len = 34n+31. Saves 3n bytes vs the
+	   pre-B2 baseline of 37n+31. */
+	size_t min_tmp_len = ((size_t)34 << logn) + 31;
 #else
+	/* Scalar: integer-NTT post-ffsamp needs G[]. */
 	size_t min_tmp_len = ((size_t)37 << logn) + 31;
 #endif
 	if (tmp == NULL || tmp_len < min_tmp_len) {
