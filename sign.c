@@ -607,12 +607,12 @@ sign_with_basis_wrapper(
 	   byte 32n (recomputed post-ffsamp), tmp_len = 34n+31. */
 	size_t min_tmp_len = ((size_t)34 << logn) + 31;
 #else
-	/* Scalar: integer-NTT post-ffsamp needs G[]. With B3 (caller-
-	   supplied G in NVRAM via G_ext), G isn't stored in tmp[] and
-	   tmp_len drops to 36n+31. Without B3, G occupies byte 36n and
-	   tmp_len is 37n+31. */
+	/* Scalar: integer-NTT post-ffsamp needs G[].
+	   With B3+Phase5 (G in NVRAM AND hm-recompute): tmp_len = 34n+31
+	   With B3 alone (G in NVRAM only):                tmp_len = 36n+31
+	   With neither (G in tmp[]):                      tmp_len = 37n+31 */
 	size_t min_tmp_len = (G_ext != NULL)
-		? ((size_t)36 << logn) + 31
+		? ((size_t)34 << logn) + 31
 		: ((size_t)37 << logn) + 31;
 #endif
 	if (tmp == NULL || tmp_len < min_tmp_len) {

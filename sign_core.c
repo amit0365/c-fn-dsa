@@ -162,11 +162,11 @@ sign_core(unsigned logn,
 		         re-decode region; hm gets corrupted by ffsamp callee
 		         overflow but is RECOMPUTED post-ffsamp before s1 use.
 		     FNDSA_LOW_RAM no-basis sign path:        48n bytes */
-#if FNDSA_LOW_RAM && (FNDSA_SSE2 || FNDSA_NEON || FNDSA_RV64D)
-		/* B2+Phase5: hm at byte 32n, recomputed post-ffsamp. */
+#if FNDSA_LOW_RAM
+		/* B2/B3 + Phase 5: hm at byte 32n, recomputed post-ffsamp.
+		   Both SIMD (B2 path) and scalar (B3 path with hm-recompute)
+		   benefit. Phase 5 lets us shrink tmp_len by 2n bytes. */
 		size_t hm_offset_n = (external_basis != NULL) ? 32 : 48;
-#elif FNDSA_LOW_RAM
-		size_t hm_offset_n = (external_basis != NULL) ? 34 : 48;
 #endif
 #if FNDSA_LOW_RAM
 		uint16_t *hm = (uint16_t *)((uint8_t *)tmp + hm_offset_n * n);
@@ -398,6 +398,14 @@ basis_setup_done:;
 		mqpoly_mul_ntt(logn, ut3, ut1);
 		mqpoly_add(logn, ut2, ut3);
 		mqpoly_ntt_to_int(logn, ut2);
+#if FNDSA_LOW_RAM
+		if (external_basis != NULL) {
+			/* B3+Phase5: hm bytes corrupted by ffsamp callee
+			   overflow during recursion. Refresh before s1 read. */
+			hash_to_point(logn, nonce, hashed_vk,
+				ctx, ctx_len, id, hv, hv_len, hm);
+		}
+#endif
 		memcpy(ut3, hm, n * sizeof(uint16_t));
 		mqpoly_ext_to_int(logn, ut3);
 		mqpoly_sub(logn, ut3, ut2);

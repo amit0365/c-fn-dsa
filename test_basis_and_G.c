@@ -135,7 +135,8 @@ run_sign_compare(unsigned logn)
 #else
 	size_t tmp_len_basis_only = (((size_t)37 << logn) + 31);
 #endif
-	size_t tmp_len_b3 = (((size_t)36 << logn) + 31);
+	/* B3+Phase5 unified: 34n+31 on both SIMD and scalar. */
+	size_t tmp_len_b3 = (((size_t)34 << logn) + 31);
 	(void)tmp_len_b3;
 	size_t sig_len = FNDSA_SIGNATURE_SIZE(logn);
 
