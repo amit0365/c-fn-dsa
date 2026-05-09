@@ -432,6 +432,47 @@ basis_setup_done:;
 		      v1 = -t0*f - t1*F  */
 		fpr *w0 = t1 + n;
 		fpr *w1 = w0 + n;
+#if FNDSA_LOW_RAM
+		if (external_basis != NULL) {
+			/* B2: basis-direct post-ffsamp.
+			   The basis is already in FFT form:
+			     b00 = FFT(g), b01 = FFT(-f),
+			     b10 = FFT(G), b11 = FFT(-F)
+			   so the lattice-point multiplication is exactly
+			     v0 = t0*b00 + t1*b10
+			     v1 = t0*b01 + t1*b11
+			   This skips the int8 re-decode + 4 fpoly_FFT calls
+			   that the legacy path uses to reconstruct g/f/G/F
+			   in FFT form, and removes the dependency on the
+			   stored int8 G[]. Saves ~4 FFTs of CPU and lets
+			   sign_step1 skip G computation in a follow-up
+			   (Phase 3 of the basis-direct kill plan). */
+			const fpr *eb00 = external_basis;
+			const fpr *eb01 = external_basis + n;
+			const fpr *eb10 = external_basis + 2 * n;
+			const fpr *eb11 = external_basis + 3 * n;
+
+			/* Save t0 and t1 originals into w0, w1; both are
+			   needed for v0 (t0,t1) and v1 (t0_orig,t1_orig). */
+			memcpy(w0, t0, n * sizeof(fpr));
+			memcpy(w1, t1, n * sizeof(fpr));
+
+			/* v0 = t0*eb00 + t1*eb10  (mutates t0, t1). */
+			fpoly_mul_fft(logn, t0, eb00);
+			fpoly_mul_fft(logn, t1, eb10);
+			fpoly_add(logn, t0, t1);
+			/* t0 holds v0; t1 holds garbage (t1_orig*eb10). */
+
+			/* v1 = t0_orig*eb01 + t1_orig*eb11.
+			   w0 = t0_orig, w1 = t1_orig. */
+			memcpy(t1, w1, n * sizeof(fpr));
+			fpoly_mul_fft(logn, t1, eb11);
+			fpoly_mul_fft(logn, w0, eb01);
+			fpoly_add(logn, t1, w0);
+			/* t1 holds v1. */
+		} else
+#endif
+		{
 		f = (int8_t *)(w1 + n);
 		g = f + n;
 		(void)trim_i8_decode(logn, sign_key_fgF, f, nbits);
@@ -451,6 +492,7 @@ basis_setup_done:;
 		fpoly_mul_fft(logn, t1, w0);
 		fpoly_add(logn, t1, w1);
 		fpoly_neg(logn, t1);
+		}
 		fpoly_iFFT(logn, t0);
 		fpoly_iFFT(logn, t1);
 

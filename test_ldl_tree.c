@@ -172,7 +172,7 @@ run_sign_compare(unsigned logn)
 	size_t vk_len = FNDSA_VRFY_KEY_SIZE(logn);
 	size_t basis_len = FNDSA_BASIS_SIZE(logn);
 	size_t tree_len = FNDSA_LDL_TREE_SIZE(logn);
-	size_t tmp_len = (((size_t)37 << logn) + 31);
+	size_t tmp_len = (((size_t)36 << logn) + 31);
 	size_t sig_len = FNDSA_SIGNATURE_SIZE(logn);
 
 	uint8_t *sk = malloc(sk_len);
@@ -235,10 +235,138 @@ run_sign_compare(unsigned logn)
 	return 0;
 }
 
+/* Sentinel test (Test 5): poison tmp[] with 0xCC, run sign, find which
+ * bytes were NEVER touched during the entire sign. Those bytes are
+ * candidates for elimination via buffer overlap or layout reduction.
+ *
+ * Note: this finds bytes that were never WRITTEN. Bytes that are
+ * read-only-then-untouched (e.g. constants we'd want to not allocate)
+ * still show as "untouched" if no sign-internal code writes to them.
+ * Bytes that are written-then-overwritten still show as "touched". */
+static int
+run_sentinel_test(unsigned logn)
+{
+	size_t sk_len = FNDSA_SIGN_KEY_SIZE(logn);
+	size_t vk_len = FNDSA_VRFY_KEY_SIZE(logn);
+	size_t basis_len = FNDSA_BASIS_SIZE(logn);
+	size_t tree_len = FNDSA_LDL_TREE_SIZE(logn);
+	size_t tmp_len = (((size_t)36 << logn) + 31);
+	size_t sig_len = FNDSA_SIGNATURE_SIZE(logn);
+
+	uint8_t *sk = malloc(sk_len);
+	uint8_t *vk = malloc(vk_len);
+	uint8_t *basis = aligned_alloc(8, (basis_len + 7) & ~(size_t)7);
+	uint8_t *tree = aligned_alloc(8, (tree_len + 7) & ~(size_t)7);
+	uint8_t *tmp = aligned_alloc(8, (tmp_len + 7) & ~(size_t)7);
+	uint8_t *sig = malloc(sig_len);
+
+	uint8_t kseed[32];
+	for (size_t i = 0; i < sizeof kseed; i++) {
+		kseed[i] = (uint8_t)(i + logn);
+	}
+	fndsa_keygen_seeded(logn, kseed, sizeof kseed, sk, vk);
+	if (!fndsa_compute_basis(sk, sk_len, basis, basis_len)) return 1;
+
+	size_t tree_tmp_len = ((size_t)4 << logn) * sizeof(fpr) + 31;
+	uint8_t *tree_tmp = aligned_alloc(8,
+		(tree_tmp_len + 7) & ~(size_t)7);
+	if (!fndsa_compute_ldl_tree(logn, basis, basis_len,
+		tree, tree_len, tree_tmp, tree_tmp_len)) return 1;
+	free(tree_tmp);
+
+	const char *msg = "the quick brown fox jumps over the lazy dog";
+	uint8_t sigseed[56];
+	for (size_t i = 0; i < sizeof sigseed; i++) {
+		sigseed[i] = (uint8_t)(0xAA + i);
+	}
+
+	/* Poison tmp[] with sentinel before sign. */
+	const uint8_t SENTINEL = 0xCC;
+	memset(tmp, SENTINEL, tmp_len);
+
+	size_t s = fndsa_sign_seeded_with_basis_and_tree_temp(
+		sk, sk_len, basis, tree,
+		NULL, 0, FNDSA_HASH_ID_RAW, msg, strlen(msg),
+		sigseed, sizeof sigseed,
+		sig, sig_len, tmp, tmp_len);
+	if (s == 0) {
+		fprintf(stderr, "[logn=%u] sign failed\n", logn);
+		return 1;
+	}
+
+	/* Walk tmp[] and find regions still holding the sentinel. */
+	size_t total_untouched = 0;
+	size_t longest_run = 0;
+	size_t current_run = 0;
+	size_t longest_run_start = 0;
+	size_t current_run_start = 0;
+	size_t n = (size_t)1 << logn;
+	for (size_t i = 0; i < tmp_len; i++) {
+		if (tmp[i] == SENTINEL) {
+			if (current_run == 0) current_run_start = i;
+			current_run++;
+			total_untouched++;
+			if (current_run > longest_run) {
+				longest_run = current_run;
+				longest_run_start = current_run_start;
+			}
+		} else {
+			current_run = 0;
+		}
+	}
+
+	printf("[logn=%u, n=%zu] tmp_len=%zu (=37n+31)\n",
+		logn, n, tmp_len);
+	printf("  Untouched bytes total: %zu (= %.2f%% of tmp[])\n",
+		total_untouched, 100.0 * total_untouched / tmp_len);
+	printf("  Longest contiguous untouched run: %zu bytes\n",
+		longest_run);
+	if (longest_run > 0) {
+		double byte_offset = (double)longest_run_start;
+		printf("    starts at byte %zu (= byte %.2fn, qc(%.2f) at outer)\n",
+			longest_run_start,
+			byte_offset / (double)n,
+			byte_offset / (2.0 * (double)n));
+	}
+
+	/* List all untouched runs >= 16 bytes (interesting ones). */
+	printf("  Untouched runs >= 16 bytes:\n");
+	current_run = 0;
+	current_run_start = 0;
+	for (size_t i = 0; i <= tmp_len; i++) {
+		uint8_t b = (i < tmp_len) ? tmp[i] : 0;
+		if (i < tmp_len && b == SENTINEL) {
+			if (current_run == 0) current_run_start = i;
+			current_run++;
+		} else {
+			if (current_run >= 16) {
+				printf("    bytes %zu..%zu (%zu bytes, %.2f..%.2f n)\n",
+					current_run_start, i,
+					current_run,
+					(double)current_run_start / (double)n,
+					(double)i / (double)n);
+			}
+			current_run = 0;
+		}
+	}
+
+	free(sk); free(vk); free(basis); free(tree); free(tmp); free(sig);
+	return 0;
+}
+
 int
 main(int argc, char **argv)
 {
 	int do_compare = (argc > 1 && argv[1][0] == 'c');
+	int do_sentinel = (argc > 1 && argv[1][0] == 's');
+	if (do_sentinel) {
+		fprintf(stderr, "running sentinel logn=9...\n");
+		if (run_sentinel_test(9) != 0) return 1;
+		fprintf(stderr, "running sentinel logn=10...\n");
+		if (run_sentinel_test(10) != 0) return 1;
+		printf("Sentinel test passed.\n");
+		return 0;
+	}
 	if (run_test(9) != 0) return 1;
 	if (run_test(10) != 0) return 1;
 	if (do_compare) {

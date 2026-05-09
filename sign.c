@@ -83,7 +83,11 @@ sign_step1(unsigned logn, const uint8_t *sign_key,
 	/* Rebuild G and the public polynomial h:
 	      h = g/f mod X^n+1 mod q
 	      G = h*F mod X^n+1 mod q
-	   We also compute the SHAKE256 hash of the verifying key. */
+	   We also compute the SHAKE256 hash of the verifying key.
+	   Under FNDSA_LOW_RAM with external_basis, sign_core's post-ffsamp
+	   uses basis-direct multiplication (B2) and never reads G[]; we
+	   skip the G derivation/storage. The basis was already validated
+	   by fndsa_compute_basis() so G's range check isn't needed here. */
 	uint16_t *t1 = (uint16_t *)tmp;
 	uint16_t *t0 = t1 + n;
 	/* t0 <- h = g/f */
@@ -95,14 +99,20 @@ sign_step1(unsigned logn, const uint8_t *sign_key,
 		/* f is not invertible; the key is not valid */
 		return 0;
 	}
-	/* t1 <- G = h*F */
-	mqpoly_small_to_int(logn, F, t1);
-	mqpoly_int_to_ntt(logn, t1);
-	mqpoly_mul_ntt(logn, t1, t0);
-	mqpoly_ntt_to_int(logn, t1);
-	if (!mqpoly_int_to_small(logn, t1, G)) {
-		/* coefficients of G are out-of-range */
-		return 0;
+#if FNDSA_LOW_RAM
+	if (external_basis == NULL)
+#endif
+	{
+		/* t1 <- G = h*F (skipped when external_basis is provided
+		   since sign_core's basis-direct path doesn't need G[]). */
+		mqpoly_small_to_int(logn, F, t1);
+		mqpoly_int_to_ntt(logn, t1);
+		mqpoly_mul_ntt(logn, t1, t0);
+		mqpoly_ntt_to_int(logn, t1);
+		if (!mqpoly_int_to_small(logn, t1, G)) {
+			/* coefficients of G are out-of-range */
+			return 0;
+		}
 	}
 	/* t0 contains h (in ntt representation), we encode and hash
 	   the verifying key.
@@ -516,13 +526,16 @@ sign_with_basis_wrapper(
 	if (max_sig_len < FNDSA_SIGNATURE_SIZE(logn)) {
 		return 0;
 	}
-	/* tmp[] layout under FNDSA_LOW_RAM: ffsamp outer peak (4n fpr) +
-	   FP-stays post-ffsamp scratch (ends at byte 34n: w0+w1+f+g) +
-	   hm (2n) + G (n) + 31 = 37n+31 bytes. Same minimum for the
-	   tree variant: B1 step 2 eliminates the memcpys but does not
-	   shrink the qc layout (unused slots are interleaved, not at
-	   the buffer end). */
-	if (tmp == NULL || tmp_len < (((size_t)37 << logn) + 31)) {
+	/* tmp[] layout under FNDSA_LOW_RAM (with basis, B2 active):
+	     ffsamp peak (34n) + hm (2n) + 31 align = 36n+31 bytes
+	     G is no longer stored: sign_step1 skips its derivation when
+	     external_basis is provided, and sign_core's basis-direct
+	     post-ffsamp reads basis in FFT form instead of int8 G[].
+	     Saves n bytes vs the previous 37n+31 lower bound.
+	     The tree variant uses the same minimum (the qc-layout
+	     interleavings prevent shrinking further within ffsamp).
+	     Further reduction requires hm-recompute (separate optimization). */
+	if (tmp == NULL || tmp_len < (((size_t)36 << logn) + 31)) {
 		return 0;
 	}
 
