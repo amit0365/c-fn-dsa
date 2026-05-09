@@ -241,6 +241,22 @@
    more than just keeping it in scratch. Saves another 4 KiB at
    FN-DSA-512 / 8 KiB at FN-DSA-1024.
 
+   Layer B2 (basis-direct post-ffsamp): when external_basis is provided,
+   the post-ffsamp lattice-point multiplication
+     v0 = t0*g + t1*G,  v1 = -t0*f - t1*F
+   is computed by directly multiplying t0/t1 against the FFT-form
+   basis components (b00=FFT(g), b01=FFT(-f), b10=FFT(G), b11=FFT(-F))
+   that already live in the caller-supplied basis buffer:
+     v0 = t0*b00 + t1*b10
+     v1 = t0*b01 + t1*b11
+   This eliminates the int8 re-decode of f/g and 4 fpoly_FFT calls
+   in the legacy post-ffsamp path. Coupled with sign_step1 skipping
+   the G derivation (since sign_core no longer reads int8 G[]),
+   tmp[] shrinks from 37n+31 to 36n+31 bytes (n bytes saved: 0.5 KiB
+   at FN-DSA-512, 1 KiB at FN-DSA-1024). Sign is also faster (post-
+   ffsamp drops 4 FFTs and ~3 NTT-domain operations). On host x86_64
+   measured 5-11% faster sign vs Layer-3 alone.
+
    Note: The FP operation order changes vs baseline. But it produces
    bit-exact outputs with respect to the baseline at every supported logn
    (2..10). Verified by test_kat_stress (1000 seeds at logn 2..8, 100 at
