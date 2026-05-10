@@ -415,6 +415,33 @@ size_t fndsa_sign_seeded_with_basis_and_G_temp(
 	void *tmp, size_t tmp_len);
 
 /* ===================================================================== *
+ * Combined: basis + G + LDL tree all in NVRAM (B0 + B3 + Phase5).
+ *
+ * The fastest, smallest-RAM signing path. Caller stores all three
+ * precomputed objects in flash:
+ *   basis: FNDSA_BASIS_SIZE(logn) bytes (4n fpr in FFT form)
+ *   G:     FNDSA_G_SIZE(logn) bytes (n int8)
+ *   tree:  FNDSA_LDL_TREE_SIZE(logn) bytes (level-major LDL)
+ * Sign reads all three from flash; no LDL math, no G derivation.
+ * tmp_len minimum: 34n+31 bytes (with B3+Phase5 active). */
+size_t fndsa_sign_with_basis_G_and_tree_temp(
+	const void *sign_key, size_t sign_key_len,
+	const void *basis, const void *G_buf, const void *tree,
+	const void *ctx, size_t ctx_len,
+	const char *id, const void *hv, size_t hv_len,
+	void *sig, size_t max_sig_len,
+	void *tmp, size_t tmp_len);
+
+size_t fndsa_sign_seeded_with_basis_G_and_tree_temp(
+	const void *sign_key, size_t sign_key_len,
+	const void *basis, const void *G_buf, const void *tree,
+	const void *ctx, size_t ctx_len,
+	const char *id, const void *hv, size_t hv_len,
+	const void *seed, size_t seed_len,
+	void *sig, size_t max_sig_len,
+	void *tmp, size_t tmp_len);
+
+/* ===================================================================== *
  * LDL tree precomputation (flash-resident, B0)
  *
  * In addition to the precomputed basis (above), an even more aggressive

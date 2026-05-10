@@ -730,4 +730,44 @@ fndsa_sign_seeded_with_basis_and_G_temp(
 		seed, seed_len, sig, max_sig_len, tmp, tmp_len);
 }
 
+/* see fndsa.h. Combined: basis + G + tree all in NVRAM. Maximum
+   savings: tmp[] = 34n+31 (G in NVRAM, hm-recomputed) AND faster
+   sign (LDL tree pre-decomposed in flash, no fpoly_LDL_fft calls). */
+size_t
+fndsa_sign_with_basis_G_and_tree_temp(
+	const void *sign_key, size_t sign_key_len,
+	const void *basis, const void *G_buf, const void *tree,
+	const void *ctx, size_t ctx_len,
+	const char *id, const void *hv, size_t hv_len,
+	void *sig, size_t max_sig_len,
+	void *tmp, size_t tmp_len)
+{
+	if (G_buf == NULL || tree == NULL) return 0;
+	return sign_with_basis_wrapper(
+		sign_key, sign_key_len,
+		(const fpr *)basis, (const uint8_t *)tree,
+		(const int8_t *)G_buf,
+		ctx, ctx_len, id, hv, hv_len,
+		NULL, 0, sig, max_sig_len, tmp, tmp_len);
+}
+
+size_t
+fndsa_sign_seeded_with_basis_G_and_tree_temp(
+	const void *sign_key, size_t sign_key_len,
+	const void *basis, const void *G_buf, const void *tree,
+	const void *ctx, size_t ctx_len,
+	const char *id, const void *hv, size_t hv_len,
+	const void *seed, size_t seed_len,
+	void *sig, size_t max_sig_len,
+	void *tmp, size_t tmp_len)
+{
+	if (G_buf == NULL || tree == NULL) return 0;
+	return sign_with_basis_wrapper(
+		sign_key, sign_key_len,
+		(const fpr *)basis, (const uint8_t *)tree,
+		(const int8_t *)G_buf,
+		ctx, ctx_len, id, hv, hv_len,
+		seed, seed_len, sig, max_sig_len, tmp, tmp_len);
+}
+
 #endif /* FNDSA_LOW_RAM */
