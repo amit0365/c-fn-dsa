@@ -23,6 +23,77 @@
 @ =======================================================================
 
 @ -----------------------------------------------------------------------
+@ Macro: ADD_POST_EXTRACT
+@   Inlined body of fpr_add starting AFTER the operand extraction
+@   (sign_fpr_cm4.s lines 220-327). Skips the 22-cycle extract prologue
+@   that calls would pay for.
+@
+@   Required input state (must be set up by caller):
+@     r6:r7 = mantissa of x in 56-bit form (multiple of 8 if bottom 3 bits
+@             matter for rounding; otherwise sticky in low bits is fine)
+@     r2:r3 = mantissa of y in 56-bit form
+@     r4    = ex (biased exponent, [0, 2046])
+@     r0    = ey (biased exponent)
+@     r5    = sign info: bit 31 = sign-xor, bits 0-30 = sign of x
+@
+@   Output: r0:r1 = result fpr.
+@   Clobbers: r2, r3, r4, r5, r6, r7, r12, flags.
+@   Cycle estimate: ~38 cycles (vs fpr_add's 69 = saves ~31 cyc).
+@ -----------------------------------------------------------------------
+.macro ADD_POST_EXTRACT
+	@ === Alignment shift (lines 230-258 of fpr_add) ===
+	subs	r0, r4, r0
+	usat	r0, #6, r0
+	sbfx	r1, r0, #5, #1
+	and	r12, r1, r2, lsr #1
+	bic	r2, r2, r1
+	umlal	r3, r2, r3, r1
+	and	r0, r0, #31
+	mov	r1, #0xFFFFFFFF
+	lsr	r1, r0
+	eors	r0, r0
+	umlal	r3, r0, r3, r1
+	umlal	r2, r3, r2, r1
+	orrs	r12, r12, r2, lsr #1
+	usat	r2, #1, r12
+	orrs	r3, r2
+
+	@ === Signed combination (lines 266-270 of fpr_add) ===
+	movs	r1, #1
+	orr	r2, r1, r5, asr #31
+	add	r0, r0, r3, lsr #31
+	smlal	r6, r7, r3, r2
+	mla	r7, r0, r2, r7
+
+	@ === Normalize (lines 279-291 of fpr_add) ===
+	clz	r2, r7
+	sbfx	r0, r2, #5, #1
+	umlal	r6, r7, r6, r0
+	add	r4, r4, r0, lsl #5
+	clz	r2, r7
+	subs	r4, r4, r2
+	lsls	r1, r2
+	umull	r6, r12, r6, r1
+	mla	r12, r1, r7, r12
+
+	@ === Exponent fixup (lines 302-307 of fpr_add) ===
+	adds	r4, #7
+	ands	r4, r4, r12, asr #31
+
+	@ === Round to 53 bits (lines 320-327 of fpr_add) ===
+	lsls	r5, #31
+	orr	r1, r5, r4, lsl #20
+	lsls	r3, r6, #21
+	lsrs	r0, r6, #11
+	bfi	r3, r0, #27, #1
+	adds	r3, r3, #0x78000000
+	adcs	r0, r0, r12, lsl #21
+	adcs	r1, r1, r12, lsr #11
+
+	@ Output: r0:r1 = result fpr.
+.endm
+
+@ -----------------------------------------------------------------------
 @ Macro: MUL_EXT
 @   Computes  z = x * y  with extended precision.
 @   Inputs (registers): r0:r1 = x (fpr), r2:r3 = y (fpr).
@@ -177,10 +248,9 @@
 	.thumb_func
 	.type	fndsa_fpr_complex_mul_asm, %function
 fndsa_fpr_complex_mul_asm:
-	@ FIRST-PASS IMPLEMENTATION: calls existing fpr_mul/fpr_add via BL,
-	@ uses VFP scratch for intermediate spills. This eliminates the per-
-	@ call frame setup the C compiler generates, but doesn't yet exploit
-	@ the round-skipping savings of true fusion.
+	@ FIRST-PASS: calls existing fpr_mul/fpr_add via BL, uses VFP for
+	@ spills. Cycle count: 41 (body) + 4*35 (mul) + 2*69 (add) = 319 cyc.
+	@ See fndsa_fpr_complex_mul_fused_asm below for the actual fused version.
 	@
 	@ Custom calling convention:
 	@   Inputs:  r0:r1=a_re, r2:r3=a_im, r4:r5=b_re, r6:r7=b_im
@@ -236,6 +306,160 @@ fndsa_fpr_complex_mul_asm:
 
 	pop	{pc}                  @ restore LR and return
 	.size	fndsa_fpr_complex_mul_asm,.-fndsa_fpr_complex_mul_asm
+
+@ =======================================================================
+@ FUSED version: uses fpr_mul (still BL) for the 4 multiplies but
+@ INLINES the add bodies via ADD_POST_EXTRACT to skip the per-call
+@ extract overhead.
+@
+@ Strategy: still call fpr_mul to get fpr-form intermediate products,
+@ then EXTRACT them inline (2 ops each) and run ADD_POST_EXTRACT.
+@ This avoids re-entering fpr_add's prologue + extract = ~25 cyc each.
+@
+@ Note: this isn't "true fusion" (we still round each mul to 53-bit),
+@ but it captures the BL-overhead savings on the add side.
+@
+@ Cycle target: 4*35 (mul) + 2*40 (add inline) + ~50 (extraction +
+@                 orchestration) = ~270 cyc vs reference 347 = ~2.2% e2e.
+@ =======================================================================
+	.align	2
+	.global	fndsa_fpr_complex_mul_fused_asm
+	.thumb
+	.thumb_func
+	.type	fndsa_fpr_complex_mul_fused_asm, %function
+fndsa_fpr_complex_mul_fused_asm:
+	@ Custom calling convention:
+	@   Inputs:  r0:r1=a_re, r2:r3=a_im, r4:r5=b_re, r6:r7=b_im
+	@   Outputs: r0:r1=d_re, r2:r3=d_im
+	push	{r14}
+
+	@ Spill all inputs to VFP
+	vmov	s0, s1, r0, r1
+	vmov	s2, s3, r2, r3
+	vmov	s4, s5, r4, r5
+	vmov	s6, s7, r6, r7
+
+	@ p_rr = fpr_mul(a_re, b_re)
+	mov	r2, r4
+	mov	r3, r5
+	bl	fndsa_fpr_mul
+	vmov	s8, s9, r0, r1            @ save p_rr
+
+	@ p_ii = fpr_mul(a_im, b_im)
+	vmov	r0, r1, s2, s3
+	vmov	r2, r3, s6, s7
+	bl	fndsa_fpr_mul
+	@ d_re = p_rr - p_ii. Flip sign of p_ii first.
+	eor	r1, r1, #0x80000000
+	@ Now we need to extract both operands and run ADD_POST_EXTRACT.
+	@ Operands:
+	@   x = p_rr (in s8:s9)
+	@   y = p_ii_neg (in r0:r1)
+	@ Set up post-extract state (mirroring fpr_add lines 197-218):
+	@   r6:r7 = mantissa of x scaled to 56-bit
+	@   r2:r3 = mantissa of y scaled to 56-bit
+	@   r4 = ex (biased)
+	@   r0 = ey (biased)
+	@   r5 = sign info
+	mov	r2, r0                    @ y_lo
+	mov	r3, r1                    @ y_hi
+	vmov	r6, r7, s8, s9            @ x = p_rr
+
+	@ Conditional swap (lines 182-191) — needed because we don't know
+	@ which has greater abs value. Re-using existing code shape:
+	@ But operands are now in r6:r7 and r2:r3 (not r0:r1 and r2:r3).
+	@ Move them to standard slots first.
+	mov	r0, r6
+	mov	r1, r7
+	@ Now r0:r1 = x, r2:r3 = y. Run conditional swap.
+	lsls	r7, r1, #1
+	subs	r6, r1, r1, asr #31
+	sbcs	r6, r0, r2
+	sbcs	r6, r7, r3, lsl #1
+	sbcs	r4, r4
+	uadd8	r4, r4, r4
+	sel	r6, r2, r0
+	sel	r7, r3, r1
+	sel	r2, r0, r2
+	sel	r3, r1, r3
+	@ Now x is in r6:r7, y in r2:r3.
+
+	@ Build sign info (lines 197-198):
+	and	r5, r3, #0x80000000
+	eor	r5, r5, r7, asr #31
+
+	@ Extract mantissas to 53-bit form with implicit-1 (lines 204-211):
+	ubfx	r4, r7, #20, #11          @ ex
+	usat	r1, #1, r4
+	bfi	r7, r1, #20, #12
+	ubfx	r0, r3, #20, #11          @ ey
+	usat	r1, #1, r0
+	bfi	r3, r1, #20, #12
+
+	@ Scale to 56-bit (lines 214-218):
+	mov	r1, #7
+	lsls	r7, #3
+	umlal	r6, r7, r6, r1
+	lsls	r3, #3
+	umlal	r2, r3, r2, r1
+
+	@ NOW the post-extract state is set up. Run the inline add body.
+	ADD_POST_EXTRACT
+	@ Result: r0:r1 = d_re. Save it.
+	vmov	s12, s13, r0, r1
+
+	@ p_ri = fpr_mul(a_re, b_im)
+	vmov	r0, r1, s0, s1
+	vmov	r2, r3, s6, s7
+	bl	fndsa_fpr_mul
+	vmov	s10, s11, r0, r1            @ save p_ri
+
+	@ p_ir = fpr_mul(a_im, b_re)
+	vmov	r0, r1, s2, s3
+	vmov	r2, r3, s4, s5
+	bl	fndsa_fpr_mul
+	@ d_im = p_ri + p_ir. p_ir is in r0:r1.
+	mov	r2, r0
+	mov	r3, r1
+	vmov	r0, r1, s10, s11            @ p_ri into r0:r1
+
+	@ Conditional swap
+	lsls	r7, r1, #1
+	subs	r6, r1, r1, asr #31
+	sbcs	r6, r0, r2
+	sbcs	r6, r7, r3, lsl #1
+	sbcs	r4, r4
+	uadd8	r4, r4, r4
+	sel	r6, r2, r0
+	sel	r7, r3, r1
+	sel	r2, r0, r2
+	sel	r3, r1, r3
+
+	and	r5, r3, #0x80000000
+	eor	r5, r5, r7, asr #31
+
+	ubfx	r4, r7, #20, #11
+	usat	r1, #1, r4
+	bfi	r7, r1, #20, #12
+	ubfx	r0, r3, #20, #11
+	usat	r1, #1, r0
+	bfi	r3, r1, #20, #12
+
+	mov	r1, #7
+	lsls	r7, #3
+	umlal	r6, r7, r6, r1
+	lsls	r3, #3
+	umlal	r2, r3, r2, r1
+
+	ADD_POST_EXTRACT
+	@ d_im in r0:r1; move to r2:r3 for output
+	mov	r2, r0
+	mov	r3, r1
+	@ Restore d_re into r0:r1
+	vmov	r0, r1, s12, s13
+
+	pop	{pc}
+	.size	fndsa_fpr_complex_mul_fused_asm,.-fndsa_fpr_complex_mul_fused_asm
 
 @ =======================================================================
 @ fpr_mul_no_round (helper for fused FPC_MUL)
