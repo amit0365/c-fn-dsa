@@ -177,20 +177,64 @@
 	.thumb_func
 	.type	fndsa_fpr_complex_mul_asm, %function
 fndsa_fpr_complex_mul_asm:
-	@ TODO: full implementation. For now, this entry point is reserved
-	@ for the asm port. The C wrapper in sign_fpc_mul.c calls the C
-	@ reference (fndsa_fpr_complex_mul). When this asm is complete, the
-	@ FPC_MUL macro on M4 should call this directly.
+	@ FIRST-PASS IMPLEMENTATION: calls existing fpr_mul/fpr_add via BL,
+	@ uses VFP scratch for intermediate spills. This eliminates the per-
+	@ call frame setup the C compiler generates, but doesn't yet exploit
+	@ the round-skipping savings of true fusion.
 	@
-	@ Sketched flow:
-	@   1. Spill all 4 inputs to s0-s7.
-	@   2. MUL_EXT(a_re, b_re) → save (r0:r1, r4, r5) to s8-s11.
-	@   3. MUL_EXT(a_im, b_im) → ADD_EXT_SUB → ROUND → store as d_re in s12-s13.
-	@   4. MUL_EXT(a_re, b_im) → save to s8-s11.
-	@   5. MUL_EXT(a_im, b_re) → ADD_EXT_ADD → ROUND → r2:r3 = d_im.
-	@   6. Restore d_re from s12-s13 into r0:r1.
-	@   7. Return.
-	bx	lr
+	@ Custom calling convention:
+	@   Inputs:  r0:r1=a_re, r2:r3=a_im, r4:r5=b_re, r6:r7=b_im
+	@   Outputs: r0:r1=d_re, r2:r3=d_im
+	@   Clobbers: r0-r12, r14, flags, s0-s15
+	push	{r14}                 @ save LR
+
+	@ Save all 4 inputs to VFP scratch
+	vmov	s0, s1, r0, r1        @ s0:s1 = a_re
+	vmov	s2, s3, r2, r3        @ s2:s3 = a_im
+	vmov	s4, s5, r4, r5        @ s4:s5 = b_re
+	vmov	s6, s7, r6, r7        @ s6:s7 = b_im
+
+	@ p_rr = fpr_mul(a_re, b_re).  Inputs already in r0:r1 and r4:r5.
+	mov	r2, r4
+	mov	r3, r5
+	bl	fndsa_fpr_mul
+	vmov	s8, s9, r0, r1        @ s8:s9 = p_rr
+
+	@ p_ii = fpr_mul(a_im, b_im).
+	vmov	r0, r1, s2, s3        @ a_im
+	vmov	r2, r3, s6, s7        @ b_im
+	bl	fndsa_fpr_mul
+	@ d_re = fpr_sub(p_rr, p_ii) = fpr_add(p_rr, -p_ii).
+	@ Flip sign of p_ii (top bit of r1)
+	eor	r1, r1, #0x80000000
+	mov	r2, r0
+	mov	r3, r1
+	vmov	r0, r1, s8, s9        @ p_rr into r0:r1
+	bl	fndsa_fpr_add
+	vmov	s12, s13, r0, r1      @ s12:s13 = d_re
+
+	@ p_ri = fpr_mul(a_re, b_im).
+	vmov	r0, r1, s0, s1        @ a_re
+	vmov	r2, r3, s6, s7        @ b_im
+	bl	fndsa_fpr_mul
+	vmov	s10, s11, r0, r1      @ s10:s11 = p_ri
+
+	@ p_ir = fpr_mul(a_im, b_re).
+	vmov	r0, r1, s2, s3        @ a_im
+	vmov	r2, r3, s4, s5        @ b_re
+	bl	fndsa_fpr_mul
+	@ d_im = fpr_add(p_ri, p_ir).  p_ir is in r0:r1.
+	mov	r2, r0
+	mov	r3, r1
+	vmov	r0, r1, s10, s11      @ p_ri into r0:r1
+	bl	fndsa_fpr_add
+	@ d_im now in r0:r1; need to move to r2:r3 for output convention
+	mov	r2, r0
+	mov	r3, r1
+	@ Restore d_re into r0:r1
+	vmov	r0, r1, s12, s13
+
+	pop	{pc}                  @ restore LR and return
 	.size	fndsa_fpr_complex_mul_asm,.-fndsa_fpr_complex_mul_asm
 
 @ =======================================================================
