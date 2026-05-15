@@ -117,6 +117,25 @@ than reference, lowest implementation risk, no register spills.
   against long-double truth. Pass criterion: fused not systematically
   worse than reference (allows the ~22% precision-improvement diffs).
 
+### M4 cycle estimates (cross-compiled C)
+
+  Cross-compiled with arm-none-eabi-gcc -mcpu=cortex-m4 -O3:
+    fndsa_fpr_complex_mul (fully inlined): ~458 cycles per call
+  Reference FPC_MUL on M4 (4× hand-tuned fpr_mul + 2× hand-tuned fpr_add):
+    ~308 cycles per call
+
+  Conclusion: compiled C is 50% SLOWER than reference asm on M4. Shipping
+  the C version on M4 would regress signing by ~14% e2e (~460K extra
+  cycles per sign). The C reference is for HOST use and as the
+  correctness oracle for the asm port — DO NOT enable
+  FNDSA_FPC_MUL_FUSED=1 on M4 builds without the asm port done.
+
+  Hand-tuned asm target: ~250 cycles per FPC_MUL (save 4 round/pack
+  overheads ~9 cyc each + 5 frame overheads ~6 cyc each = ~66 cyc).
+  That's ~1.5% e2e improvement, not the 3.5% earlier projected.
+  (The 3.5% projection underestimated how tight Pornin's existing asm
+  already is.)
+
 ### Validation results (1M random + 10K signs)
 
   Random equivalence (1M tuples):
