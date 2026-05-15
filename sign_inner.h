@@ -8,6 +8,7 @@
  */
 
 #include "inner.h"
+#include "bench_regions.h"
 
 /* ==================================================================== */
 /*
@@ -231,6 +232,8 @@ fpr_sub(fpr x, fpr y)
 #define FPR_ADD_SUB(a, b, x, y)   do { \
 		fpr t_add_sub_x = (x); \
 		fpr t_add_sub_y = (y); \
+		BENCH_PRIM_INC(BENCH_PRIM_ADD_SUB); \
+		BENCH_DEXP_RECORD(t_add_sub_x, t_add_sub_y); \
 		(a) = fpr_add(t_add_sub_x, t_add_sub_y); \
 		(b) = fpr_sub(t_add_sub_x, t_add_sub_y); \
 	} while (0)

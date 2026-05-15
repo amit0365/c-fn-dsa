@@ -60,6 +60,7 @@ lzcnt64_nonzero(uint64_t x)
 fpr
 fpr_scaled(int64_t i, int sc)
 {
+	BENCH_PRIM_INC(BENCH_PRIM_SCALED);
 	/* Get sign and absolute value. */
 	uint64_t s = (uint64_t)(i >> 63);
 	uint64_t m = ((uint64_t)i ^ s) - s;
@@ -85,6 +86,7 @@ fpr_scaled(int64_t i, int sc)
 fpr
 fpr_add(fpr x, fpr y)
 {
+	BENCH_PRIM_INC(BENCH_PRIM_ADD);
 	/* Get both operands as x and y, and such that x has the greater
 	   absolute value of the two. If x and y have the same absolute
 	   value and different signs, when we want x to be the positive
@@ -163,6 +165,7 @@ fpr_add(fpr x, fpr y)
 fpr
 fpr_mul(fpr x, fpr y)
 {
+	BENCH_PRIM_INC(BENCH_PRIM_MUL);
 	/* Extract absolute values of mantissas, assuming non-zero
 	   operands, and multiply them together. */
 	uint64_t xu = (x & M52) | ((uint64_t)1 << 52);
@@ -229,6 +232,7 @@ fpr_mul(fpr x, fpr y)
 fpr
 fpr_div(fpr x, fpr y)
 {
+	BENCH_PRIM_INC(BENCH_PRIM_DIV);
 	/* Extract mantissas (unsigned). */
 	uint64_t xu = (x & M52) | ((uint64_t)1 << 52);
 	uint64_t yu = (y & M52) | ((uint64_t)1 << 52);
@@ -279,6 +283,7 @@ fpr_div(fpr x, fpr y)
 fpr
 fpr_sqrt(fpr x)
 {
+	BENCH_PRIM_INC(BENCH_PRIM_SQRT);
 	/* Extract exponent and mantissa. By assumption, the operand is
 	   non-negative, hence we can ignore the sign bit (we must still
 	   mask it out because sqrt() should work on -0.0). We want the

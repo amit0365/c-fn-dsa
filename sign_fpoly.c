@@ -3,6 +3,7 @@
  */
 
 #include "sign_inner.h"
+#include "bench_regions.h"
 
 /* If rev() is the bit-reversal function over 10 bits, then,
    for k = 1 to 1023:
@@ -1042,6 +1043,7 @@ TARGET_SSE2 TARGET_NEON
 void
 fpoly_FFT(unsigned logn, fpr *f)
 {
+	BENCH_REGION_ENTER(BENCH_REGION_FFT);
 #if FNDSA_SSE2
 	size_t n = (size_t)1 << logn;
 	size_t hn = n >> 1;
@@ -1266,6 +1268,7 @@ fpoly_FFT(unsigned logn, fpr *f)
 		t = ht;
 	}
 #endif
+	BENCH_REGION_LEAVE(BENCH_REGION_FFT);
 }
 
 /* see sign_inner.h */
@@ -1273,6 +1276,7 @@ TARGET_SSE2 TARGET_NEON
 void
 fpoly_iFFT(unsigned logn, fpr *f)
 {
+	BENCH_REGION_ENTER(BENCH_REGION_IFFT);
 #if FNDSA_SSE2
 	size_t n = (size_t)1 << logn;
 	size_t hn = n >> 1;
@@ -1560,6 +1564,7 @@ fpoly_iFFT(unsigned logn, fpr *f)
 		f[i] = fpr_div2e(f[i], logn - 1);
 	}
 #endif
+	BENCH_REGION_LEAVE(BENCH_REGION_IFFT);
 }
 
 /* see sign_inner.h */
