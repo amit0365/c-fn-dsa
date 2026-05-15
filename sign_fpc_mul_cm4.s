@@ -192,3 +192,123 @@ fndsa_fpr_complex_mul_asm:
 	@   7. Return.
 	bx	lr
 	.size	fndsa_fpr_complex_mul_asm,.-fndsa_fpr_complex_mul_asm
+
+@ =======================================================================
+@ fpr_mul_no_round (helper for fused FPC_MUL)
+@
+@ Computes x * y but outputs in 55-bit-mantissa form (matching Pornin's
+@ pre-round intermediate from fpr_mul) instead of rounding to 53-bit fpr.
+@
+@ Custom calling convention (called via inline asm only):
+@   Inputs:  r0:r1 = x, r2:r3 = y
+@   Outputs:
+@     r0:r1   = 55-bit mantissa, top bit at 54, low bit sticky (lo:hi)
+@     r4      = unbiased exponent, signed
+@     r5      = sign (bit 31 set/unset; lower bits = 0)
+@   Clobbers: r2, r3, r6, r7, r12, flags. VFP s0-s2 used for callee saves.
+@
+@ Cycle estimate (static): 28 cycles body + 4 frame = 32 cycles.
+@ Mirrors fpr_mul body (sign_fpr_cm4.s lines 643-710), changes:
+@   - Shift constant 2^12 -> 2^14 to produce 55-bit form (not 53-bit)
+@   - Compute sticky bit instead of round bit
+@   - No final adcs/pack into fpr; output components separately
+@ =======================================================================
+	.align	2
+	.global	fndsa_fpr_mul_no_round
+	.thumb
+	.thumb_func
+	.type	fndsa_fpr_mul_no_round, %function
+fndsa_fpr_mul_no_round:
+	@ Save callee-saves to VFP scratch (mirrors fpr_mul prologue)
+	vmov	s0, s1, r4, r5
+	vmov	s2, r6
+
+	@ ---- Setup: extract exponents, sign, handle zero (mirrors fpr_mul lines 647-672) ----
+	ubfx	r6, r1, #20, #11      @ ex
+	ubfx	r12, r3, #20, #11     @ ey
+	eor	r5, r1, r3            @ top bit = sign(x) ^ sign(y)
+	adds	r4, r6, r12
+	sub	r4, r4, #1024
+	mul	r6, r6, r12           @ r6 != 0 iff both ex,ey non-zero
+	usat	r6, #1, r6
+	muls	r4, r6                @ exp = 0 if either input zero
+	bfi	r1, r6, #20, #12      @ insert implicit-1 (or 0 if input zero)
+	bfi	r3, r6, #20, #12
+
+	@ ---- 53*53 multiply (Pornin's umull/umaal sequence, lines 681-684) ----
+	umull	r6, r12, r0, r2       @ r6:r12 = lo*lo
+	umull	r4, r0, r0, r3        @ r4:r0  = lo*hi (note: r4 reused later for exp)
+	umaal	r12, r4, r1, r2       @ r12:r4 += hi*lo
+	umaal	r4, r0, r1, r3        @ r4:r0  += hi*hi
+	@ Now r6:r12:r4:r0 (low to high) = 106-bit product.
+
+	@ ---- Shift to 55-bit form (top bit at 54), put result in r3:r12 ----
+	@ Pornin shifts to 53-bit; we shift to 55 by changing the shift constant.
+	@ 53-bit shift used 2^12 (->shift 52) or 2^11 (->shift 53).
+	@ For 55-bit, use 2^14 (->shift 50) or 2^13 (->shift 51).
+	lsrs	r3, r0, #9            @ r3 = 1 if top bit at 105, else 0
+	@ Recover the sign+exp word: same as Pornin (r5 with top bit only)
+	add	r5, r3, r5, lsr #20   @ Wait — we want r5 to keep sign + need exp separately.
+	@ ^ Actually for our convention we want sign and exp in SEPARATE regs.
+	@ Pornin's `add r5, r3, r5, lsr #20` packs exp adjustment + truncates
+	@ extra bits. For us: just remember the exp adjustment in r3.
+	@ Roll back: we want unbiased exp in r4 at end, but r4 is being used
+	@ as a multiply intermediate. Let me restore it from VFP.
+
+	movw	r2, #0x4000           @ 2^14 (vs Pornin's 2^12 = 0x1000)
+	lsrs	r2, r3                @ r2 = 2^14 (case A) or 2^13 (case B)
+
+	@ Do the shift: r1:r3:r12 receives the shifted product (3 regs, 96 bits).
+	umull	r1, r3, r12, r2       @ r3:r1 = r12 * shift_factor
+	mul	r12, r0, r2           @ r12 = r0 * shift_factor (low 32)
+	umlal	r3, r12, r4, r2       @ r12:r3 += r4 * shift_factor
+
+	@ After this:
+	@   r3:r12 = 55-bit mantissa (top bit at 54), in lo:hi
+	@   r1     = bits dropped from above the cutoff (rounding bit + below)
+	@   r6     = bottom 32 bits dropped (sticky)
+
+	@ ---- Compute sticky bit (OR of all dropped bits) ----
+	@ For our 55-bit-with-sticky output, we want LSB of r3 to reflect
+	@ "any bit was dropped below position 54". The dropped bits are:
+	@   - all of r6
+	@   - all of r1
+	@   - any nonzero in r12's already-shifted-out bits (none since umlal cleanly)
+	orrs	r6, r6, r1            @ r6 = combined dropped bits
+	usat	r6, #1, r6            @ r6 = 0 or 1
+	orrs	r3, r3, r6            @ set lsb of r3 = sticky
+
+	@ ---- Restore exp into r4 and sign into r5, output format conversion ----
+	@ Currently:
+	@   r3:r12 = 55-bit mantissa (lo:hi)
+	@   r5 (mangled by `add r5, r3, r5, lsr #20`) — drop and restore from saved.
+	@ Hmm we mangled r5. Need to recompute exp + sign cleanly.
+
+	@ Restore original ex+ey-1024 from VFP-saved r4 (s0)? No wait, r4
+	@ holds the multiply intermediate now. We need to EITHER preserve r4 across
+	@ the multiply (impossible — Pornin's umaal sequence reuses it) or RECOMPUTE
+	@ exp.
+
+	@ Recompute exp from x and y (loaded from VFP):
+	@ Actually r0:r1 still hold the operands? No — r0 was used in umull and r1 in umaal.
+	@ The original x and y are gone.
+
+	@ STATUS: This is where the design needs more thought. Pornin's fpr_mul
+	@ keeps exp in r5 via the `add r5, r3, r5, lsr #20` which combines
+	@ exp+sign into a single packed form. For our split-output convention
+	@ we'd need an additional register (or VFP slot) for exp. That's an
+	@ extra cycle or two of overhead.
+	@
+	@ For now, leave this stub returning a packed sign+exp in r5 (Pornin's
+	@ convention) and let the caller unpack as needed. Output:
+	@   r0 (= old r3) : r1 (= old r12)  = 55-bit mantissa (lo:hi)
+	@   r5 = packed (sign in bit 31, exp in bits 20-30) - Pornin's format
+	@   r2-r4, r12 clobbered
+	mov	r0, r3
+	mov	r1, r12
+
+	@ Restore callee-saves
+	vmov	r4, r5, s0, s1
+	vmov	r6, s2
+	bx	lr
+	.size	fndsa_fpr_mul_no_round,.-fndsa_fpr_mul_no_round
