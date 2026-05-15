@@ -327,6 +327,25 @@ fpr_mul2e(fpr x, unsigned e)
      d <- (a_r*b_r - a_i*b_i) + i*(a_r*b_i + a_i*b_r)
    It is faster than trying to use three multiplications, because additions
    and subtractions have about the same cost as multiplication in practice. */
+#if FNDSA_FPC_MUL_FUSED
+/* Fused complex multiply route. Calls fndsa_fpr_complex_mul which is
+   currently a STUB (just expands to the same 4-mul-2-add as the macro)
+   but can be replaced with a hand-tuned asm routine without touching
+   call sites. See sign_fpc_mul.c and tools/fpc_mul_design.md.
+
+   Enable via -DFNDSA_FPC_MUL_FUSED=1 (default off until asm is ready). */
+extern void fndsa_fpr_complex_mul(fpr *d_re, fpr *d_im,
+                                  fpr a_re, fpr a_im, fpr b_re, fpr b_im);
+#define FPC_MUL(d_re, d_im, a_re, a_im, b_re, b_im)   do { \
+		fpr fpct_a_re = (a_re), fpct_a_im = (a_im); \
+		fpr fpct_b_re = (b_re), fpct_b_im = (b_im); \
+		fpr fpct_dr, fpct_di; \
+		fndsa_fpr_complex_mul(&fpct_dr, &fpct_di, \
+			fpct_a_re, fpct_a_im, fpct_b_re, fpct_b_im); \
+		(d_re) = fpct_dr; \
+		(d_im) = fpct_di; \
+	} while (0)
+#else
 #define FPC_MUL(d_re, d_im, a_re, a_im, b_re, b_im)   do { \
 		fpr fpct_a_re = (a_re), fpct_a_im = (a_im); \
 		fpr fpct_b_re = (b_re), fpct_b_im = (b_im); \
@@ -339,6 +358,7 @@ fpr_mul2e(fpr x, unsigned e)
 		(d_re) = fpct_d_re; \
 		(d_im) = fpct_d_im; \
 	} while (0)
+#endif
 
 /* ==================================================================== */
 /*
